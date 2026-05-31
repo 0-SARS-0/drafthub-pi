@@ -1,0 +1,16 @@
+[Unit]
+Description=DraftHub Pi touchscreen application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/drafthub-pi
+Environment=PYTHONPATH=/opt/drafthub-pi/app
+ExecStart=/usr/bin/python3 -m drafthub_pi
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

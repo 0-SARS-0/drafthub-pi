@@ -1,0 +1,15 @@
+{
+  "display": {
+    "width": 480,
+    "height": 480
+  },
+  "playback": {
+    "fps": 15,
+    "loop": true
+  },
+  "storage": {
+    "media_dir": "/var/lib/drafthub/media",
+    "state_dir": "/var/lib/drafthub/state"
+  }
+}
+
