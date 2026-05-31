@@ -53,10 +53,40 @@ the display model before adding further overrides.
 
 ## Touch input
 
-HDMI carries the image, but touchscreen input is usually a separate USB cable.
-After connecting the touch cable, inspect the detected devices:
+HDMI carries the image. The DraftHub display sends touchscreen input over its
+separate USB cable. Connect both HDMI and USB before powering on the Pi.
+
+The controller should normally appear as a standard Linux USB HID input device,
+so start by inspecting the detected devices:
 
 ```bash
 cat /proc/bus/input/devices
 ls -l /dev/input/by-id /dev/input/by-path
+lsusb
 ```
+
+Look for a touchscreen, HID, or controller-board entry and note its
+`/dev/input/event*` device.
+
+Install the input event test tool:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y evtest
+```
+
+Then run it against the touchscreen event device:
+
+```bash
+sudo evtest /dev/input/eventX
+```
+
+Touch the four corners and the centre of the panel. Keep the event output from
+the first test. It will tell us:
+
+- whether Linux sees the touch controller
+- whether the axes cover the expected range
+- whether X or Y is inverted
+- whether the axes need swapping
+
+Do not add calibration overrides until this raw event test is complete.

@@ -63,7 +63,7 @@ journalctl -u drafthub-pi -f
 ## Next steps
 
 - confirm whether the HDMI display advertises its 480x480 mode through EDID
-- confirm whether touch connects over USB and identify the input device
+- identify and test the USB HID touchscreen input device
 - add playback for DraftHub `.vid` media
 - add a local upload API and device pairing
 - add playlist persistence with SQLite
