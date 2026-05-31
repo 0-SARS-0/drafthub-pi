@@ -33,6 +33,10 @@ The service starts `python3 -m drafthub_pi` as the `pi` user. If the Raspberry
 Pi OS user is not named `pi`, edit `systemd/drafthub-pi.service` before
 installing.
 
+For the 480x480 HDMI display bring-up, follow
+[`docs/hdmi-display.md`](docs/hdmi-display.md). Start with HDMI auto-detection
+before forcing a custom console mode.
+
 ## Development
 
 Install Python 3 and pygame, then run:
@@ -58,7 +62,8 @@ journalctl -u drafthub-pi -f
 
 ## Next steps
 
-- confirm display and touch controller details
+- confirm whether the HDMI display advertises its 480x480 mode through EDID
+- confirm whether touch connects over USB and identify the input device
 - add playback for DraftHub `.vid` media
 - add a local upload API and device pairing
 - add playlist persistence with SQLite
