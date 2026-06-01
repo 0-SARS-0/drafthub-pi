@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=raspberry
 WorkingDirectory=/opt/drafthub-pi
 Environment=PYTHONPATH=/opt/drafthub-pi/app
 ExecStart=/usr/bin/python3 -m drafthub_pi

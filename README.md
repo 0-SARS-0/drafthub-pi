@@ -29,9 +29,8 @@ automatically at boot without a desktop environment.
    sudo reboot
    ```
 
-The service starts `python3 -m drafthub_pi` as the `pi` user. If the Raspberry
-Pi OS user is not named `pi`, edit `systemd/drafthub-pi.service` before
-installing.
+The service starts `python3 -m drafthub_pi` as the `raspberry` user. This is the
+DraftHub device account selected during Raspberry Pi OS setup.
 
 For the 480x480 HDMI display bring-up, follow
 [`docs/hdmi-display.md`](docs/hdmi-display.md). Start with HDMI auto-detection
