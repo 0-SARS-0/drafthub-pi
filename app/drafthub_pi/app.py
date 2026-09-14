@@ -153,6 +153,15 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       width: 100%;
       margin-bottom: 12px;
     }
+    progress {
+      display: block;
+      width: 100%;
+      height: 14px;
+      margin-top: 12px;
+    }
+    progress[hidden] {
+      display: none;
+    }
     .status {
       color: #a4c2d6;
       min-height: 20px;
@@ -191,6 +200,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       <h2>Upload Media</h2>
       <input id="file" type="file" accept=".vid,.rgb565,.mp4,.png,.jpg,.jpeg,.zlib">
       <button id="upload">Upload</button>
+      <progress id="upload-progress" max="100" value="0" hidden></progress>
       <div class="status" id="upload-status"></div>
     </section>
 
@@ -217,6 +227,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const playlist = document.querySelector("#playlist");
     const playlistStatus = document.querySelector("#playlist-status");
     const uploadStatus = document.querySelector("#upload-status");
+    const uploadProgress = document.querySelector("#upload-progress");
     const uploadButton = document.querySelector("#upload");
     const savePlaylistButton = document.querySelector("#save-playlist");
     const playPlaylistButton = document.querySelector("#play-playlist");
@@ -237,6 +248,33 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       const response = await fetch(path, options);
       if (!response.ok) throw new Error(await response.text() || response.statusText);
       return response;
+    }
+
+    function uploadFile(file) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("POST", `/upload?name=${encodeURIComponent(file.name)}`);
+        request.upload.addEventListener("progress", (event) => {
+          uploadProgress.hidden = false;
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            uploadProgress.value = percent;
+            uploadStatus.textContent = `Uploading ${file.name}: ${percent}% (${sizeLabel(event.loaded)} / ${sizeLabel(event.total)})`;
+          } else {
+            uploadStatus.textContent = `Uploading ${file.name}: ${sizeLabel(event.loaded)}`;
+          }
+        });
+        request.addEventListener("load", () => {
+          if (request.status >= 200 && request.status < 300) {
+            resolve(request.responseText);
+          } else {
+            reject(new Error(request.responseText || request.statusText));
+          }
+        });
+        request.addEventListener("error", () => reject(new Error("Upload failed")));
+        request.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+        request.send(file);
+      });
     }
 
     function isPlayable(name) {
@@ -415,12 +453,12 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         return;
       }
       uploadButton.disabled = true;
+      uploadProgress.hidden = false;
+      uploadProgress.value = 0;
       uploadStatus.textContent = `Uploading ${file.name}...`;
       try {
-        await request(`/upload?name=${encodeURIComponent(file.name)}`, {
-          method: "POST",
-          body: file,
-        });
+        await uploadFile(file);
+        uploadProgress.value = 100;
         uploadStatus.textContent = `Uploaded ${file.name}`;
         fileInput.value = "";
         await refreshMedia();
