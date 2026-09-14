@@ -37,6 +37,7 @@ DEFAULT_FRAMEBUFFER_VIEWPORT = "480x480+0+0"
 DEFAULT_MEDIA_DIR = Path("/var/lib/drafthub/media")
 DEFAULT_STATE_DIR = Path("/var/lib/drafthub/state")
 DEFAULT_UPLOAD_PORT = 8080
+NETWORK_HELPER_PATH = Path("/usr/local/sbin/drafthub-network")
 MANAGER_PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -120,6 +121,24 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       display: flex;
       gap: 8px;
       margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .field-row {
+      display: flex;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .field-row input,
+    .field-row select {
+      min-width: 0;
+      flex: 1;
+      border: 1px solid #366c96;
+      border-radius: 6px;
+      box-sizing: border-box;
+      background: #081c32;
+      color: #eef6fb;
+      font: inherit;
+      padding: 8px;
     }
     input[type="number"] {
       width: 76px;
@@ -197,6 +216,20 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     </header>
 
     <section>
+      <h2>Wi-Fi</h2>
+      <div id="wifi-summary" class="meta">Checking Wi-Fi...</div>
+      <div class="field-row">
+        <select id="wifi-ssid"></select>
+        <button id="wifi-scan">Scan</button>
+      </div>
+      <div class="field-row">
+        <input id="wifi-password" type="password" autocomplete="new-password" placeholder="Venue Wi-Fi password">
+        <button id="wifi-connect">Connect</button>
+      </div>
+      <div class="status" id="wifi-status"></div>
+    </section>
+
+    <section>
       <h2>Upload Media</h2>
       <input id="file" type="file" accept=".vid,.rgb565,.mp4,.png,.jpg,.jpeg,.zlib">
       <button id="upload">Upload</button>
@@ -230,6 +263,12 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const uploadStatus = document.querySelector("#upload-status");
     const uploadProgress = document.querySelector("#upload-progress");
     const uploadButton = document.querySelector("#upload");
+    const wifiSummary = document.querySelector("#wifi-summary");
+    const wifiStatus = document.querySelector("#wifi-status");
+    const wifiSsid = document.querySelector("#wifi-ssid");
+    const wifiPassword = document.querySelector("#wifi-password");
+    const wifiScanButton = document.querySelector("#wifi-scan");
+    const wifiConnectButton = document.querySelector("#wifi-connect");
     const savePlaylistButton = document.querySelector("#save-playlist");
     const playPlaylistButton = document.querySelector("#play-playlist");
     const stopPlaylistButton = document.querySelector("#stop-playlist");
@@ -250,6 +289,46 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       const response = await fetch(path, options);
       if (!response.ok) throw new Error(await response.text() || response.statusText);
       return response;
+    }
+
+    function renderWifiStatus(payload) {
+      const ap = payload.ap_ssid ? `${payload.ap_ssid} (${payload.ap_address})` : "not configured";
+      const venue = payload.venue_ssid || "not connected";
+      const internet = payload.internet ? "online" : "offline";
+      wifiSummary.textContent = `DraftHub AP: ${ap} | Venue Wi-Fi: ${venue} | Internet: ${internet}`;
+      if (!payload.network_manager) {
+        wifiStatus.textContent = "Network setup is not enabled on this device yet.";
+      }
+    }
+
+    async function refreshWifiStatus() {
+      try {
+        const response = await request("/wifi-status");
+        renderWifiStatus(await response.json());
+      } catch (error) {
+        wifiStatus.textContent = `Wi-Fi status error: ${error.message}`;
+      }
+    }
+
+    async function scanWifi() {
+      wifiStatus.textContent = "Scanning...";
+      wifiScanButton.disabled = true;
+      try {
+        const response = await request("/wifi-scan");
+        const payload = await response.json();
+        wifiSsid.replaceChildren();
+        for (const network of payload.networks || []) {
+          const option = document.createElement("option");
+          option.value = network.ssid;
+          option.textContent = `${network.ssid} (${network.signal}%)`;
+          wifiSsid.append(option);
+        }
+        wifiStatus.textContent = payload.networks?.length ? "Select a venue network." : "No Wi-Fi networks found.";
+      } catch (error) {
+        wifiStatus.textContent = `Scan error: ${error.message}`;
+      } finally {
+        wifiScanButton.disabled = false;
+      }
     }
 
     function uploadFile(file) {
@@ -483,6 +562,33 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       }
     });
 
+    wifiScanButton.addEventListener("click", scanWifi);
+
+    wifiConnectButton.addEventListener("click", async () => {
+      const ssid = wifiSsid.value.trim();
+      if (!ssid) {
+        wifiStatus.textContent = "Choose a venue Wi-Fi network first.";
+        return;
+      }
+      wifiConnectButton.disabled = true;
+      wifiStatus.textContent = `Connecting to ${ssid}...`;
+      try {
+        const response = await request("/wifi-configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ssid, password: wifiPassword.value }),
+        });
+        const payload = await response.json();
+        wifiPassword.value = "";
+        wifiStatus.textContent = payload.ok ? `Connected to ${payload.ssid}.` : `Connection failed: ${payload.message}`;
+        await refreshWifiStatus();
+      } catch (error) {
+        wifiStatus.textContent = `Connection error: ${error.message}`;
+      } finally {
+        wifiConnectButton.disabled = false;
+      }
+    });
+
     savePlaylistButton.addEventListener("click", async () => {
       clearTimeout(playlistSaveTimer);
       playlistStatus.textContent = "Saving...";
@@ -518,6 +624,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
 
     refreshMedia();
     refreshPlaylist();
+    refreshWifiStatus();
   </script>
 </body>
 </html>
@@ -1140,6 +1247,12 @@ class UploadServer:
                 if parsed.path == "/playlist":
                     self.send_json({"items": upload_server.load_playlist_json()})
                     return
+                if parsed.path == "/wifi-status":
+                    self.handle_network_command("status")
+                    return
+                if parsed.path == "/wifi-scan":
+                    self.handle_network_command("scan")
+                    return
                 if parsed.path != "/media-index":
                     self.send_error(404, "Not Found")
                     return
@@ -1195,6 +1308,9 @@ class UploadServer:
                 if parsed.path == "/delete":
                     self.handle_delete(parsed.query)
                     return
+                if parsed.path == "/wifi-configure":
+                    self.handle_wifi_configure()
+                    return
                 if parsed.path != "/upload":
                     self.send_error(404)
                     return
@@ -1236,6 +1352,25 @@ class UploadServer:
                     self.send_error(400, str(exc))
                     return
                 self.send_text(200, f"Deleted {target_name}")
+
+            def handle_network_command(self, command: str, payload: object | None = None) -> None:
+                try:
+                    result = upload_server.network_command(command, payload)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_json(result)
+
+            def handle_wifi_configure(self) -> None:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    if content_length <= 0:
+                        raise ValueError("Wi-Fi configuration body is empty")
+                    payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                    self.handle_network_command("configure-venue", payload)
+                except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
 
             def handle_play(self, query_string: str) -> None:
                 query = urllib.parse.parse_qs(query_string)
@@ -1308,6 +1443,40 @@ class UploadServer:
         target_path.unlink()
         self.remove_from_playlist(target_name)
         LOGGER.info("Deleted media path=%s", target_path)
+
+    def network_command(self, command: str, payload: object | None = None) -> object:
+        if command not in {"status", "scan", "configure-venue"}:
+            raise ValueError("Unsupported network command")
+        if not NETWORK_HELPER_PATH.exists():
+            if command == "status":
+                return {
+                    "network_manager": False,
+                    "dnsmasq": False,
+                    "capability": {"available": False, "reason": "DraftHub network helper is not installed"},
+                    "managed_interface": None,
+                    "ap_interface": None,
+                    "ap_ssid": None,
+                    "ap_address": "192.168.50.1",
+                    "venue_ssid": None,
+                    "active_connections": [],
+                    "default_route": "",
+                    "internet": False,
+                }
+            raise RuntimeError("DraftHub network helper is not installed. Run the installer with --enable-networking.")
+        input_text = json.dumps(payload) if payload is not None else None
+        result = subprocess.run(
+            ["sudo", "-n", str(NETWORK_HELPER_PATH), command],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Network command failed")
+        try:
+            return json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Network helper returned invalid JSON") from exc
 
     def remove_from_playlist(self, target_name: str) -> None:
         playlist = self.load_playlist()

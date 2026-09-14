@@ -1,0 +1,13 @@
+[Unit]
+Description=DraftHub Wi-Fi AP/STA setup
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/drafthub-pi
+ExecStart=/usr/bin/python3 /opt/drafthub-pi/scripts/drafthub_network.py ensure-ap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

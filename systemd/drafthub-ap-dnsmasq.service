@@ -1,0 +1,13 @@
+[Unit]
+Description=DraftHub management AP DHCP/DNS
+After=drafthub-network.service
+Requires=drafthub-network.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/drafthub/dnsmasq-ap.conf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

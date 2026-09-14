@@ -40,6 +40,46 @@ The installer creates a dedicated `drafthub` service user, adds it to any
 available `video`, `render`, and `input` groups, installs Python/pygame/ffmpeg,
 creates `/var/lib/drafthub`, and starts `drafthub-pi.service`.
 
+### Dual Wi-Fi Management Network
+
+DraftHub includes an optional NetworkManager-based Wi-Fi setup for the Radxa
+Zero 3W. It keeps the player connected to venue Wi-Fi as a normal client while
+also providing a local management AP:
+
+```text
+Venue Wi-Fi / Internet -> Radxa STA
+DraftHub-XXXX -> Radxa AP at http://192.168.50.1:8080/manage
+```
+
+Enable it explicitly from the device:
+
+```bash
+cd /opt/drafthub-pi
+sudo ./scripts/install.sh --enable-networking
+```
+
+This installs `network-manager`, `dnsmasq-base`, and `iw`, then enables:
+
+- `drafthub-network.service` to create the virtual AP interface and
+  NetworkManager AP profile
+- `drafthub-ap-dnsmasq.service` to provide DHCP/DNS only on the DraftHub AP
+
+The AP uses `192.168.50.1/24` and does not set up NAT or routing to the venue
+LAN. Cloud traffic should continue to use the venue Wi-Fi default route. The AP
+SSID and generated WPA password are stored root-only in:
+
+```text
+/etc/drafthub/network.json
+```
+
+The installer backs up existing netplan files to `/etc/drafthub/netplan-backup`
+before enabling NetworkManager services. Repeated installer runs are idempotent:
+they update the same DraftHub profiles/services rather than creating duplicates.
+
+The manager page exposes Wi-Fi status, network scanning, and venue Wi-Fi
+credential submission. Passwords are submitted to the local device only and are
+not returned by the API or written by the app logs.
+
 The app reads `/sys/class/graphics/fb0/virtual_size` and
 `/sys/class/graphics/fb0/bits_per_pixel`, then scales the square DraftHub UI
 into the configured framebuffer viewport. Both 16-bit and 32-bit framebuffers
@@ -173,6 +213,36 @@ List uploaded files:
 ```text
 http://<device-ip>:8080/media-index
 ```
+
+## Dual Wi-Fi Test Procedure
+
+After enabling networking, verify:
+
+```bash
+systemctl status NetworkManager drafthub-network drafthub-ap-dnsmasq --no-pager
+sudo /usr/local/sbin/drafthub-network status
+ip route
+```
+
+Test cases:
+
+- Fresh device with no venue profile: `DraftHub-XXXX` SSID is visible and
+  `http://192.168.50.1:8080/manage` loads after joining it.
+- Successful venue provisioning: scan, select SSID, enter password, and confirm
+  the manager shows the venue SSID plus Internet online.
+- Incorrect venue password: connection reports failure and the DraftHub AP stays
+  available.
+- Venue Wi-Fi unavailable or drops: local cached playback continues and the AP
+  remains available.
+- Internet unavailable while venue Wi-Fi is connected: manager reports Internet
+  offline but the player and AP remain available.
+- Venue password changes: connect to the DraftHub AP, submit the new password,
+  and confirm reconnection without SSH.
+- Reboot: `DraftHub-XXXX` returns, DHCP works, and the venue profile reconnects.
+- Simultaneous AP + STA: `iw dev` shows the venue managed interface and `dhap0`
+  AP interface at the same time.
+- Cloud/default traffic: `ip route` default route points at the venue Wi-Fi
+  interface, not `dhap0`.
 
 ## Logs
 
