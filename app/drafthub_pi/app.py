@@ -598,7 +598,25 @@ class DraftHubApp:
                 if self.upload_server.playback_stop.is_set():
                     LOGGER.info("Playlist playback stopped")
                     return
-                self.play_media(self.upload_server.media_dir / item.name, item.duration or None)
+                media_path = self.upload_server.media_dir / item.name
+                self.play_media(media_path, self.playlist_item_duration(media_path, item.duration))
+
+    def playlist_item_duration(self, media_path: Path, duration: float) -> float | None:
+        if duration > 0:
+            return duration
+        suffix = media_path.suffix.lower()
+        if suffix in (".vid", ".rgb565"):
+            try:
+                frame_bytes = self.video_size[0] * self.video_size[1] * 2
+                frame_count = media_path.stat().st_size // frame_bytes
+                return max(1 / 30, frame_count / 30)
+            except OSError:
+                return 10
+        if suffix in UploadServer.IMAGE_SUFFIXES:
+            return 10
+        if suffix == ".mp4":
+            return 10
+        return None
 
     def present_canvas(self) -> None:
         if self.canvas is self.screen:
@@ -921,7 +939,7 @@ class FramebufferPresenter:
             )
             self.buffer.write(pixels[source_offset : source_offset + row_bytes])
 
-    def present_rgb565(self, frame: bytes, width: int, height: int) -> None:
+    def present_rgb565(self, frame: bytes | memoryview, width: int, height: int) -> None:
         if (
             self.bits_per_pixel == 16
             and width == self.video_viewport.width
@@ -935,7 +953,7 @@ class FramebufferPresenter:
             return
 
         frame_surface = self.get_rgb565_surface(width, height)
-        frame_surface.get_buffer().write(frame)
+        frame_surface.get_buffer().write(bytes(frame) if isinstance(frame, memoryview) else frame)
         if width == self.video_viewport.width and height == self.video_viewport.height:
             self.surface.blit(frame_surface, self.video_viewport.topleft)
             self.write_rect(self.video_viewport)
@@ -1407,8 +1425,10 @@ class RawVidPlayer:
                             return
                         start = frame_index * self.frame_bytes
                         frame = frames[start : start + self.frame_bytes]
-                        presenter.present_rgb565(frame, self.width, self.height)
-                        frame.release()
+                        try:
+                            presenter.present_rgb565(frame, self.width, self.height)
+                        finally:
+                            frame.release()
                         frame_count += 1
                         frame_index = (frame_index + 1) % self.frame_count
                         missed_frames = pacer.wait()
