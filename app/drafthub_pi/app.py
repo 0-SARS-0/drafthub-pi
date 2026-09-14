@@ -285,6 +285,10 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       return name.match(/\\.(png|jpg|jpeg)$/i);
     }
 
+    function isVideo(name) {
+      return name.match(/\\.(vid|rgb565|mp4)$/i);
+    }
+
     async function savePlaylist(statusText = "Playlist saved.") {
       await request("/playlist", {
         method: "POST",
@@ -329,16 +333,24 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
 
         const actions = document.createElement("div");
         actions.className = "actions";
-        const duration = document.createElement("input");
-        duration.type = "number";
-        duration.min = "1";
-        duration.max = "3600";
-        duration.value = item.duration;
-        duration.title = "Seconds";
-        duration.addEventListener("change", () => {
-          playlistItems[index].duration = Math.max(1, Number(duration.value) || 1);
-          autosavePlaylist();
-        });
+        let durationControl;
+        if (isImage(item.name)) {
+          durationControl = document.createElement("input");
+          durationControl.type = "number";
+          durationControl.min = "1";
+          durationControl.max = "3600";
+          durationControl.value = item.duration || 10;
+          durationControl.title = "Seconds";
+          durationControl.addEventListener("change", () => {
+            playlistItems[index].duration = Math.max(1, Number(durationControl.value) || 1);
+            autosavePlaylist();
+          });
+        } else {
+          durationControl = document.createElement("div");
+          durationControl.className = "meta";
+          durationControl.textContent = "Full length";
+          playlistItems[index].duration = 0;
+        }
         const up = document.createElement("button");
         up.textContent = "Up";
         up.disabled = index === 0;
@@ -363,7 +375,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
           renderPlaylist();
           autosavePlaylist();
         });
-        actions.append(duration, up, down, remove);
+        actions.append(durationControl, up, down, remove);
         row.append(info, actions);
         playlist.append(row);
       });
@@ -419,7 +431,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
           add.textContent = "Add";
           add.disabled = !isPlayable(file.name);
           add.addEventListener("click", () => {
-            playlistItems.push({ name: file.name, duration: isImage(file.name) ? 10 : 0 });
+            playlistItems.push({ name: file.name, duration: isVideo(file.name) ? 0 : 10 });
             renderPlaylist();
             autosavePlaylist();
           });
@@ -640,8 +652,6 @@ class DraftHubApp:
                 self.play_media(media_path, self.playlist_item_duration(media_path, item.duration))
 
     def playlist_item_duration(self, media_path: Path, duration: float) -> float | None:
-        if duration > 0:
-            return duration
         suffix = media_path.suffix.lower()
         if suffix in (".vid", ".rgb565"):
             try:
@@ -649,9 +659,11 @@ class DraftHubApp:
                 return max(1 / 30, frame_count / 30)
             except (OSError, ValueError):
                 return 10
-        if suffix in UploadServer.IMAGE_SUFFIXES:
-            return 10
         if suffix == ".mp4":
+            return FfmpegMp4Player.probe_duration(media_path) or 10
+        if suffix in UploadServer.IMAGE_SUFFIXES:
+            if duration > 0:
+                return duration
             return 10
         return None
 
@@ -1354,7 +1366,10 @@ class UploadServer:
                 raise ValueError(f"Unsupported playlist media: {name}")
             if not (self.media_dir / target_name).is_file():
                 raise ValueError(f"Playlist media not found: {target_name}")
-            duration = self.parse_duration(raw_item.get("duration", 10))
+            if target_name.lower().endswith(self.IMAGE_SUFFIXES):
+                duration = self.parse_duration(raw_item.get("duration", 10))
+            else:
+                duration = 0
             items.append(PlaylistItem(target_name, duration))
         return items
 
@@ -1417,6 +1432,7 @@ class ImagePlayer:
 
 class RawVidPlayer:
     COMMON_SQUARE_SIZES = (800, 640, 600, 480, 320, 240)
+    COMMON_FRAME_HEIGHTS = (800, 720, 640, 600, 512, 576, 480, 400, 320, 240)
 
     def __init__(self, path: Path, width: int, height: int, fps: int) -> None:
         self.path = path
@@ -1439,12 +1455,21 @@ class RawVidPlayer:
     @classmethod
     def inspect(cls, path: Path, width: int, height: int) -> tuple[int, int, int, int]:
         file_size = path.stat().st_size
-        candidates = [(width, height)]
-        candidates.extend(
-            (size, size)
-            for size in cls.COMMON_SQUARE_SIZES
-            if (size, size) != (width, height)
-        )
+        candidates: list[tuple[int, int]] = []
+
+        def add_candidate(candidate_width: int, candidate_height: int) -> None:
+            candidate = (candidate_width, candidate_height)
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        add_candidate(width, height)
+        for candidate_height in cls.COMMON_FRAME_HEIGHTS:
+            add_candidate(width, candidate_height)
+        for candidate_width in cls.COMMON_FRAME_HEIGHTS:
+            add_candidate(candidate_width, height)
+        for size in cls.COMMON_SQUARE_SIZES:
+            add_candidate(size, size)
+
         for candidate_width, candidate_height in candidates:
             frame_bytes = candidate_width * candidate_height * 2
             frame_count, remainder = divmod(file_size, frame_bytes)
@@ -1453,11 +1478,11 @@ class RawVidPlayer:
         requested_frame_bytes = width * height * 2
         requested_frame_count, requested_remainder = divmod(file_size, requested_frame_bytes)
         if requested_remainder:
-            common_sizes = ", ".join(f"{size}x{size}" for size in cls.COMMON_SQUARE_SIZES)
+            common_sizes = ", ".join(f"{candidate_width}x{candidate_height}" for candidate_width, candidate_height in candidates)
             raise ValueError(
                 f"{path} has {file_size} bytes, which is not aligned to "
                 f"{width}x{height} RGB565LE frames ({requested_frame_bytes} bytes each) "
-                f"or common square VID sizes ({common_sizes})"
+                f"or common VID sizes ({common_sizes})"
             )
         if not requested_frame_count:
             raise ValueError(f"{path} does not contain any complete RGB565LE frames")
@@ -1544,6 +1569,38 @@ class FfmpegMp4Player:
         if ffmpeg is None:
             raise RuntimeError("ffmpeg is required for MP4 playback")
         return ffmpeg
+
+    @staticmethod
+    def probe_duration(path: Path) -> float | None:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            LOGGER.warning("ffprobe is unavailable; MP4 playlist duration will use fallback")
+            return None
+        command = [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            duration = float(result.stdout.strip())
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            LOGGER.warning("Unable to probe MP4 duration path=%s error=%s", path, exc)
+            return None
+        if duration <= 0:
+            return None
+        return duration
 
     def run(
         self,
