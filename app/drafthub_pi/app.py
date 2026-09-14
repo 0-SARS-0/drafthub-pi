@@ -645,10 +645,9 @@ class DraftHubApp:
         suffix = media_path.suffix.lower()
         if suffix in (".vid", ".rgb565"):
             try:
-                frame_bytes = self.video_size[0] * self.video_size[1] * 2
-                frame_count = media_path.stat().st_size // frame_bytes
+                _, _, _, frame_count = RawVidPlayer.inspect(media_path, *self.video_size)
                 return max(1 / 30, frame_count / 30)
-            except OSError:
+            except (OSError, ValueError):
                 return 10
         if suffix in UploadServer.IMAGE_SUFFIXES:
             return 10
@@ -1417,21 +1416,52 @@ class ImagePlayer:
 
 
 class RawVidPlayer:
+    COMMON_SQUARE_SIZES = (800, 640, 600, 480, 320, 240)
+
     def __init__(self, path: Path, width: int, height: int, fps: int) -> None:
         self.path = path
-        self.width = width
-        self.height = height
         self.fps = fps
-        self.frame_bytes = width * height * 2
         self.file_size = path.stat().st_size
-        self.frame_count, remainder = divmod(self.file_size, self.frame_bytes)
-        if remainder:
-            raise ValueError(
-                f"{path} has {self.file_size} bytes, which is not aligned to "
-                f"{width}x{height} RGB565LE frames ({self.frame_bytes} bytes each)"
+        self.width, self.height, self.frame_bytes, self.frame_count = self.inspect(
+            path, width, height
+        )
+        if (self.width, self.height) != (width, height):
+            LOGGER.warning(
+                "VID size inferred path=%s requested=%sx%s inferred=%sx%s frames=%s",
+                path,
+                width,
+                height,
+                self.width,
+                self.height,
+                self.frame_count,
             )
-        if not self.frame_count:
+
+    @classmethod
+    def inspect(cls, path: Path, width: int, height: int) -> tuple[int, int, int, int]:
+        file_size = path.stat().st_size
+        candidates = [(width, height)]
+        candidates.extend(
+            (size, size)
+            for size in cls.COMMON_SQUARE_SIZES
+            if (size, size) != (width, height)
+        )
+        for candidate_width, candidate_height in candidates:
+            frame_bytes = candidate_width * candidate_height * 2
+            frame_count, remainder = divmod(file_size, frame_bytes)
+            if frame_count and not remainder:
+                return candidate_width, candidate_height, frame_bytes, frame_count
+        requested_frame_bytes = width * height * 2
+        requested_frame_count, requested_remainder = divmod(file_size, requested_frame_bytes)
+        if requested_remainder:
+            common_sizes = ", ".join(f"{size}x{size}" for size in cls.COMMON_SQUARE_SIZES)
+            raise ValueError(
+                f"{path} has {file_size} bytes, which is not aligned to "
+                f"{width}x{height} RGB565LE frames ({requested_frame_bytes} bytes each) "
+                f"or common square VID sizes ({common_sizes})"
+            )
+        if not requested_frame_count:
             raise ValueError(f"{path} does not contain any complete RGB565LE frames")
+        return width, height, requested_frame_bytes, requested_frame_count
 
     def run(
         self,
