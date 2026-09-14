@@ -35,6 +35,7 @@ LOGO_CROP = pygame.Rect(96, 324, 824, 392)
 LOGO_SIZE = (156, 40)
 DEFAULT_FRAMEBUFFER_VIEWPORT = "480x480+0+0"
 DEFAULT_MEDIA_DIR = Path("/var/lib/drafthub/media")
+DEFAULT_STATE_DIR = Path("/var/lib/drafthub/state")
 DEFAULT_UPLOAD_PORT = 8080
 MANAGER_PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -115,6 +116,21 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       gap: 8px;
       flex-shrink: 0;
     }
+    .playlist-controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    input[type="number"] {
+      width: 76px;
+      border: 1px solid #366c96;
+      border-radius: 6px;
+      box-sizing: border-box;
+      background: #081c32;
+      color: #eef6fb;
+      font: inherit;
+      padding: 8px;
+    }
     button,
     input::file-selector-button {
       border: 1px solid #366c96;
@@ -173,9 +189,19 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
 
     <section>
       <h2>Upload Media</h2>
-      <input id="file" type="file" accept=".vid,.rgb565,.mp4,.zlib">
+      <input id="file" type="file" accept=".vid,.rgb565,.mp4,.png,.jpg,.jpeg,.zlib">
       <button id="upload">Upload</button>
       <div class="status" id="upload-status"></div>
+    </section>
+
+    <section>
+      <h2>Playlist</h2>
+      <div id="playlist"></div>
+      <div class="playlist-controls">
+        <button id="save-playlist">Save</button>
+        <button id="play-playlist">Play Playlist</button>
+      </div>
+      <div class="status" id="playlist-status"></div>
     </section>
 
     <section>
@@ -188,9 +214,15 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
   <script>
     const media = document.querySelector("#media");
     const mediaStatus = document.querySelector("#media-status");
+    const playlist = document.querySelector("#playlist");
+    const playlistStatus = document.querySelector("#playlist-status");
     const uploadStatus = document.querySelector("#upload-status");
     const uploadButton = document.querySelector("#upload");
+    const savePlaylistButton = document.querySelector("#save-playlist");
+    const playPlaylistButton = document.querySelector("#play-playlist");
     const fileInput = document.querySelector("#file");
+    let mediaFiles = [];
+    let playlistItems = [];
     document.querySelector("#device-url").textContent = `http://${location.host}`;
 
     function sizeLabel(bytes) {
@@ -206,11 +238,90 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       return response;
     }
 
+    function isPlayable(name) {
+      return name.match(/\\.(vid|rgb565|mp4|png|jpg|jpeg)$/i);
+    }
+
+    function isImage(name) {
+      return name.match(/\\.(png|jpg|jpeg)$/i);
+    }
+
+    function renderPlaylist() {
+      playlist.replaceChildren();
+      if (!playlistItems.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No playlist items yet.";
+        playlist.append(empty);
+        return;
+      }
+      playlistItems.forEach((item, index) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const info = document.createElement("div");
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = `${index + 1}. ${item.name}`;
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = isImage(item.name) ? "Still image" : "Video";
+        info.append(name, meta);
+
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        const duration = document.createElement("input");
+        duration.type = "number";
+        duration.min = "1";
+        duration.max = "3600";
+        duration.value = item.duration;
+        duration.title = "Seconds";
+        duration.addEventListener("change", () => {
+          playlistItems[index].duration = Math.max(1, Number(duration.value) || 1);
+        });
+        const up = document.createElement("button");
+        up.textContent = "Up";
+        up.disabled = index === 0;
+        up.addEventListener("click", () => {
+          [playlistItems[index - 1], playlistItems[index]] = [playlistItems[index], playlistItems[index - 1]];
+          renderPlaylist();
+        });
+        const down = document.createElement("button");
+        down.textContent = "Down";
+        down.disabled = index === playlistItems.length - 1;
+        down.addEventListener("click", () => {
+          [playlistItems[index], playlistItems[index + 1]] = [playlistItems[index + 1], playlistItems[index]];
+          renderPlaylist();
+        });
+        const remove = document.createElement("button");
+        remove.className = "secondary";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", () => {
+          playlistItems.splice(index, 1);
+          renderPlaylist();
+        });
+        actions.append(duration, up, down, remove);
+        row.append(info, actions);
+        playlist.append(row);
+      });
+    }
+
+    async function refreshPlaylist() {
+      try {
+        const response = await request("/playlist");
+        const payload = await response.json();
+        playlistItems = payload.items || [];
+        renderPlaylist();
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    }
+
     async function refreshMedia() {
       mediaStatus.textContent = "Refreshing...";
       try {
         const response = await request("/media-index");
         const payload = await response.json();
+        mediaFiles = payload.files;
         media.replaceChildren();
         if (!payload.files.length) {
           const empty = document.createElement("div");
@@ -234,13 +345,20 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
           actions.className = "actions";
           const play = document.createElement("button");
           play.textContent = "Play";
-          play.disabled = !file.name.match(/\\.(vid|mp4)$/i);
+          play.disabled = !isPlayable(file.name);
           play.addEventListener("click", async () => {
             mediaStatus.textContent = `Starting ${file.name}...`;
             await request(`/play?name=${encodeURIComponent(file.name)}`, { method: "POST" });
             mediaStatus.textContent = `Playing ${file.name}`;
           });
-          actions.append(play);
+          const add = document.createElement("button");
+          add.textContent = "Add";
+          add.disabled = !isPlayable(file.name);
+          add.addEventListener("click", () => {
+            playlistItems.push({ name: file.name, duration: isImage(file.name) ? 10 : 0 });
+            renderPlaylist();
+          });
+          actions.append(play, add);
           row.append(info, actions);
           media.append(row);
         }
@@ -273,7 +391,32 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       }
     });
 
+    savePlaylistButton.addEventListener("click", async () => {
+      playlistStatus.textContent = "Saving...";
+      try {
+        await request("/playlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items: playlistItems }),
+        });
+        playlistStatus.textContent = "Playlist saved.";
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    });
+
+    playPlaylistButton.addEventListener("click", async () => {
+      playlistStatus.textContent = "Starting playlist...";
+      try {
+        await request("/play-playlist", { method: "POST" });
+        playlistStatus.textContent = "Playlist playing.";
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    });
+
     refreshMedia();
+    refreshPlaylist();
   </script>
 </body>
 </html>
@@ -298,6 +441,19 @@ COLORS = {
 class NavItem:
     key: str
     label: str
+
+
+@dataclass(frozen=True)
+class PlaylistItem:
+    name: str
+    duration: float
+
+
+@dataclass(frozen=True)
+class PlaybackRequest:
+    kind: str
+    path: Path | None = None
+    playlist: tuple[PlaylistItem, ...] = ()
 
 
 NAV_ITEMS = (
@@ -344,29 +500,25 @@ class DraftHubApp:
         self.ip_address = ""
         self.ip_checked_at = 0.0
         self.nav_rects: dict[str, pygame.Rect] = {}
-        self.upload_server = UploadServer(DEFAULT_MEDIA_DIR, DEFAULT_UPLOAD_PORT)
+        self.upload_server = UploadServer(DEFAULT_MEDIA_DIR, DEFAULT_STATE_DIR, DEFAULT_UPLOAD_PORT)
         self.upload_server.start()
 
     def run(self) -> None:
         while self.running:
-            playback_path = self.upload_server.take_playback_request()
-            if playback_path is not None:
+            playback_request = self.upload_server.take_playback_request()
+            if playback_request is not None:
                 if self.framebuffer is None:
                     LOGGER.error("HTTP playback is available only in framebuffer mode")
                     continue
                 try:
-                    if playback_path.suffix.lower() == ".mp4":
-                        FfmpegMp4Player(playback_path, *self.video_size, self.mp4_fps).run(
-                            self.framebuffer,
-                            self.upload_server.playback_stop,
-                        )
+                    if playback_request.kind == "playlist":
+                        self.play_playlist(playback_request.playlist)
+                    elif playback_request.path is not None:
+                        self.play_media(playback_request.path)
                     else:
-                        RawVidPlayer(playback_path, *self.video_size, 30).run(
-                            self.framebuffer,
-                            self.upload_server.playback_stop,
-                        )
+                        LOGGER.error("Invalid playback request: %s", playback_request)
                 except Exception:
-                    LOGGER.exception("Playback failed for %s", playback_path)
+                    LOGGER.exception("Playback failed for %s", playback_request)
                 continue
             self.handle_events()
             self.draw()
@@ -377,6 +529,38 @@ class DraftHubApp:
             self.framebuffer.close()
         self.upload_server.close()
         pygame.quit()
+
+    def play_media(self, media_path: Path, duration: float | None = None) -> None:
+        suffix = media_path.suffix.lower()
+        if suffix == ".mp4":
+            FfmpegMp4Player(media_path, *self.video_size, self.mp4_fps).run(
+                self.framebuffer,
+                self.upload_server.playback_stop,
+                duration,
+            )
+        elif suffix in UploadServer.IMAGE_SUFFIXES:
+            ImagePlayer(media_path, duration).run(
+                self.framebuffer,
+                self.upload_server.playback_stop,
+            )
+        else:
+            RawVidPlayer(media_path, *self.video_size, 30).run(
+                self.framebuffer,
+                self.upload_server.playback_stop,
+                duration,
+            )
+
+    def play_playlist(self, playlist: tuple[PlaylistItem, ...]) -> None:
+        if not playlist:
+            LOGGER.warning("Playlist playback requested with no items")
+            return
+        LOGGER.info("Playing playlist items=%s loop=True", len(playlist))
+        while not self.upload_server.playback_stop.is_set():
+            for item in playlist:
+                if self.upload_server.playback_stop.is_set():
+                    LOGGER.info("Playlist playback stopped")
+                    return
+                self.play_media(self.upload_server.media_dir / item.name, item.duration or None)
 
     def present_canvas(self) -> None:
         if self.canvas is self.screen:
@@ -663,6 +847,22 @@ class FramebufferPresenter:
         self.surface.blit(scaled_canvas, (target_x, target_y))
         self.write_rect(self.clear_rect)
 
+    def present_cover(self, canvas: pygame.Surface, viewport: pygame.Rect | None = None) -> None:
+        target_viewport = viewport or self.viewport
+        source_width, source_height = canvas.get_size()
+        scale = max(target_viewport.width / source_width, target_viewport.height / source_height)
+        scaled_size = (int(source_width * scale), int(source_height * scale))
+        scaled_canvas = canvas if canvas.get_size() == scaled_size else pygame.transform.smoothscale(canvas, scaled_size)
+        source_rect = pygame.Rect(
+            (scaled_size[0] - target_viewport.width) // 2,
+            (scaled_size[1] - target_viewport.height) // 2,
+            target_viewport.width,
+            target_viewport.height,
+        )
+        self.surface.fill(COLORS["background"], self.clear_rect)
+        self.surface.blit(scaled_canvas, target_viewport.topleft, source_rect)
+        self.write_rect(self.clear_rect)
+
     @property
     def output_size_rect(self) -> pygame.Rect:
         return pygame.Rect(0, 0, *self.output_size)
@@ -766,21 +966,25 @@ class FramebufferPresenter:
 
 class UploadServer:
     SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-    MEDIA_SUFFIXES = (".vid", ".rgb565", ".mp4")
-    PLAYABLE_SUFFIXES = (".vid", ".mp4")
+    IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+    MEDIA_SUFFIXES = (".vid", ".rgb565", ".mp4", *IMAGE_SUFFIXES)
+    PLAYABLE_SUFFIXES = (".vid", ".rgb565", ".mp4", *IMAGE_SUFFIXES)
 
-    def __init__(self, media_dir: Path, port: int) -> None:
+    def __init__(self, media_dir: Path, state_dir: Path, port: int) -> None:
         self.media_dir = media_dir
+        self.state_dir = state_dir
+        self.playlist_path = state_dir / "playlist.json"
         self.port = port
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.playback_lock = threading.Lock()
-        self.playback_request: Path | None = None
+        self.playback_request: PlaybackRequest | None = None
         self.playback_stop = threading.Event()
 
     def start(self) -> None:
         try:
             self.media_dir.mkdir(parents=True, exist_ok=True)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
             self.server = ThreadingHTTPServer(("0.0.0.0", self.port), self.make_handler())
         except OSError:
             LOGGER.exception("Unable to start upload server on port %s", self.port)
@@ -815,6 +1019,9 @@ class UploadServer:
                     self.send_response(204)
                     self.end_headers()
                     return
+                if parsed.path == "/playlist":
+                    self.send_json({"items": upload_server.load_playlist_json()})
+                    return
                 if parsed.path != "/media-index":
                     self.send_error(404, "Not Found")
                     return
@@ -823,7 +1030,10 @@ class UploadServer:
                     for path in sorted(upload_server.media_dir.iterdir())
                     if path.is_file() and path.name.lower().endswith(upload_server.MEDIA_SUFFIXES)
                 ]
-                payload = json.dumps({"files": files}).encode("utf-8")
+                self.send_json({"files": files})
+
+            def send_json(self, value: object) -> None:
+                payload = json.dumps(value).encode("utf-8")
                 self.send_response(200)
                 self.send_cors_headers()
                 self.send_header("Content-Type", "application/json")
@@ -853,6 +1063,17 @@ class UploadServer:
                     upload_server.playback_stop.set()
                     self.send_text(200, "Playback stopped")
                     return
+                if parsed.path == "/playlist":
+                    self.handle_playlist_save()
+                    return
+                if parsed.path == "/play-playlist":
+                    try:
+                        upload_server.request_playlist_playback()
+                    except ValueError as exc:
+                        self.send_error(400, str(exc))
+                        return
+                    self.send_text(200, "Starting playlist")
+                    return
                 if parsed.path != "/upload":
                     self.send_error(404)
                     return
@@ -870,13 +1091,25 @@ class UploadServer:
                     return
                 self.send_text(200, f"Uploaded {target_name}")
 
+            def handle_playlist_save(self) -> None:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    if content_length <= 0:
+                        raise ValueError("Playlist body is empty")
+                    payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                    upload_server.save_playlist_json(payload)
+                except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_text(200, "Playlist saved")
+
             def handle_play(self, query_string: str) -> None:
                 query = urllib.parse.parse_qs(query_string)
                 media_name = query.get("name", [""])[0]
                 try:
                     target_name, compressed = upload_server.validate_name(media_name)
                     if compressed or not target_name.lower().endswith(upload_server.PLAYABLE_SUFFIXES):
-                        raise ValueError("Playback supports uploaded .vid and .mp4 files")
+                        raise ValueError("Playback supports uploaded .vid, .mp4, .png, .jpg, and .jpeg files")
                     upload_server.request_playback(target_name)
                 except (OSError, ValueError) as exc:
                     self.send_error(400, str(exc))
@@ -908,7 +1141,7 @@ class UploadServer:
         compressed = upload_name.lower().endswith(".zlib")
         target_name = upload_name[:-5] if compressed else upload_name
         if not target_name.lower().endswith(self.MEDIA_SUFFIXES):
-            raise ValueError("Supported uploads: .vid, .rgb565, .mp4, and .zlib transport copies")
+            raise ValueError("Supported uploads: .vid, .rgb565, .mp4, .png, .jpg, .jpeg, and .zlib transport copies")
         return target_name, compressed
 
     def receive_upload(self, source, target_name: str, content_length: int, compressed: bool) -> None:
@@ -938,15 +1171,75 @@ class UploadServer:
             raise ValueError(f"Media file not found: {target_name}")
         with self.playback_lock:
             self.playback_stop.set()
-            self.playback_request = target_path
+            self.playback_request = PlaybackRequest("media", path=target_path)
 
-    def take_playback_request(self) -> Path | None:
+    def request_playlist_playback(self) -> None:
+        playlist = tuple(self.load_playlist())
+        if not playlist:
+            raise ValueError("Playlist is empty")
+        with self.playback_lock:
+            self.playback_stop.set()
+            self.playback_request = PlaybackRequest("playlist", playlist=playlist)
+
+    def take_playback_request(self) -> PlaybackRequest | None:
         with self.playback_lock:
             playback_path = self.playback_request
             self.playback_request = None
             if playback_path is not None:
                 self.playback_stop.clear()
             return playback_path
+
+    def load_playlist_json(self) -> list[dict[str, float | str]]:
+        return [{"name": item.name, "duration": item.duration} for item in self.load_playlist()]
+
+    def load_playlist(self) -> list[PlaylistItem]:
+        if not self.playlist_path.exists():
+            return []
+        try:
+            payload = json.loads(self.playlist_path.read_text(encoding="utf-8"))
+            return self.parse_playlist_payload(payload)
+        except (OSError, ValueError, json.JSONDecodeError):
+            LOGGER.exception("Unable to load playlist %s", self.playlist_path)
+            return []
+
+    def save_playlist_json(self, payload: object) -> None:
+        items = self.parse_playlist_payload(payload)
+        serializable = {"items": [{"name": item.name, "duration": item.duration} for item in items]}
+        part_path = self.playlist_path.with_suffix(".json.part")
+        part_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+        os.replace(part_path, self.playlist_path)
+        LOGGER.info("Saved playlist path=%s items=%s", self.playlist_path, len(items))
+
+    def parse_playlist_payload(self, payload: object) -> list[PlaylistItem]:
+        if not isinstance(payload, dict):
+            raise ValueError("Playlist payload must be an object")
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            raise ValueError("Playlist payload must contain an items list")
+
+        items: list[PlaylistItem] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise ValueError("Playlist items must be objects")
+            name = str(raw_item.get("name", ""))
+            target_name, compressed = self.validate_name(name)
+            if compressed or not target_name.lower().endswith(self.PLAYABLE_SUFFIXES):
+                raise ValueError(f"Unsupported playlist media: {name}")
+            if not (self.media_dir / target_name).is_file():
+                raise ValueError(f"Playlist media not found: {target_name}")
+            duration = self.parse_duration(raw_item.get("duration", 10))
+            items.append(PlaylistItem(target_name, duration))
+        return items
+
+    @staticmethod
+    def parse_duration(value: object) -> float:
+        try:
+            duration = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Playlist item duration must be a number") from exc
+        if duration < 0 or duration > 3600:
+            raise ValueError("Playlist item duration must be between 0 and 3600 seconds")
+        return duration
 
 
 class FramePacer:
@@ -967,6 +1260,34 @@ class FramePacer:
         return 0
 
 
+def wait_for_duration(duration: float | None, stop_event: threading.Event | None) -> None:
+    if duration is None:
+        if stop_event is not None:
+            stop_event.wait()
+        return
+    end_at = time.monotonic() + duration
+    while stop_event is None or not stop_event.is_set():
+        remaining = end_at - time.monotonic()
+        if remaining <= 0:
+            return
+        if stop_event is None:
+            time.sleep(min(0.25, remaining))
+        else:
+            stop_event.wait(min(0.25, remaining))
+
+
+class ImagePlayer:
+    def __init__(self, path: Path, duration: float | None) -> None:
+        self.path = path
+        self.duration = duration
+
+    def run(self, presenter: FramebufferPresenter, stop_event: threading.Event | None = None) -> None:
+        LOGGER.info("Showing image path=%s duration=%s", self.path, self.duration)
+        image = pygame.image.load(self.path)
+        presenter.present_cover(image, presenter.video_viewport)
+        wait_for_duration(self.duration, stop_event)
+
+
 class RawVidPlayer:
     def __init__(self, path: Path, width: int, height: int, fps: int) -> None:
         self.path = path
@@ -984,25 +1305,34 @@ class RawVidPlayer:
         if not self.frame_count:
             raise ValueError(f"{path} does not contain any complete RGB565LE frames")
 
-    def run(self, presenter: FramebufferPresenter, stop_event: threading.Event | None = None) -> None:
+    def run(
+        self,
+        presenter: FramebufferPresenter,
+        stop_event: threading.Event | None = None,
+        duration: float | None = None,
+    ) -> None:
         LOGGER.info(
-            "Playing VID path=%s size=%sx%s fps=%s frames=%s loop=True",
+            "Playing VID path=%s size=%sx%s fps=%s frames=%s duration=%s",
             self.path,
             self.width,
             self.height,
             self.fps,
             self.frame_count,
+            duration,
         )
         pacer = FramePacer(self.fps)
         frame_count = 0
         skipped_frames = 0
         measured_from = time.monotonic()
+        end_at = time.monotonic() + duration if duration else None
         with self.path.open("rb") as vid_file:
             with mmap.mmap(vid_file.fileno(), 0, access=mmap.ACCESS_READ) as video:
                 frames = memoryview(video)
                 frame_index = 0
                 try:
                     while stop_event is None or not stop_event.is_set():
+                        if end_at is not None and time.monotonic() >= end_at:
+                            return
                         start = frame_index * self.frame_bytes
                         frame = frames[start : start + self.frame_bytes]
                         presenter.present_rgb565(frame, self.width, self.height)
@@ -1055,7 +1385,12 @@ class FfmpegMp4Player:
             raise RuntimeError("ffmpeg is required for MP4 playback")
         return ffmpeg
 
-    def run(self, presenter: FramebufferPresenter, stop_event: threading.Event | None = None) -> None:
+    def run(
+        self,
+        presenter: FramebufferPresenter,
+        stop_event: threading.Event | None = None,
+        duration: float | None = None,
+    ) -> None:
         pixel_format, bytes_per_pixel = presenter.video_pixel_format()
         frame_bytes = self.width * self.height * bytes_per_pixel
         video_filter = (
@@ -1082,12 +1417,13 @@ class FfmpegMp4Player:
             "-",
         ]
         LOGGER.info(
-            "Playing MP4 path=%s size=%sx%s fps=%s pixel_format=%s loop=True ffmpeg=%s",
+            "Playing MP4 path=%s size=%sx%s fps=%s pixel_format=%s duration=%s ffmpeg=%s",
             self.path,
             self.width,
             self.height,
             self.fps,
             pixel_format,
+            duration,
             self.ffmpeg,
         )
         process = subprocess.Popen(
@@ -1103,8 +1439,11 @@ class FfmpegMp4Player:
         measured_from = time.monotonic()
         frame_buffer = bytearray(frame_bytes)
         frame_view = memoryview(frame_buffer)
+        end_at = time.monotonic() + duration if duration else None
         try:
             while stop_event is None or not stop_event.is_set():
+                if end_at is not None and time.monotonic() >= end_at:
+                    return
                 if not read_exact_into(process.stdout, frame_view):
                     stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                     raise RuntimeError(f"ffmpeg ended before a complete frame was available: {stderr.strip()}")
