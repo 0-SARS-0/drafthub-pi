@@ -7,6 +7,7 @@ import mmap
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -18,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pygame
+
+from . import __version__
 
 
 WIDTH = 480
@@ -93,6 +96,9 @@ class DraftHubApp:
         self.font_heading = pygame.font.Font(None, 32)
         self.font_large = pygame.font.Font(None, 44)
         self.logo = self.load_logo()
+        self.build_label = get_build_label()
+        self.ip_address = ""
+        self.ip_checked_at = 0.0
         self.nav_rects: dict[str, pygame.Rect] = {}
         self.upload_server = UploadServer(DEFAULT_MEDIA_DIR, DEFAULT_UPLOAD_PORT)
         self.upload_server.start()
@@ -188,17 +194,27 @@ class DraftHubApp:
             return None
 
     def draw_connection(self) -> None:
+        self.refresh_network_address()
+        manager_url = f"http://{self.ip_address}:8080" if self.ip_address else "Waiting for network"
         self.draw_section_title("Connection", "Network status")
-        self.draw_panel(pygame.Rect(58, 112, 364, 112), "NETWORK", "Connected", COLORS["success"])
-        self.draw_label_value("SSID", os.environ.get("DRAFTHUB_WIFI_SSID", "DraftHub WiFi"), 142)
-        self.draw_label_value("IP", os.environ.get("DRAFTHUB_IP_ADDRESS", "192.168.0.31"), 170)
-        self.draw_label_value("Manager", "http://device-ip:8080", 198)
+        self.draw_panel(pygame.Rect(58, 112, 364, 128), "NETWORK", "Connected", COLORS["success"])
+        self.draw_label_value("SSID", os.environ.get("DRAFTHUB_WIFI_SSID", "DraftHub WiFi"), 140)
+        self.draw_label_value("IP", self.ip_address or "Detecting...", 166)
+        self.draw_label_value("Manager", manager_url, 192)
+        self.draw_label_value("Build", self.build_label, 218)
 
-        self.draw_panel(pygame.Rect(58, 236, 364, 96), "DEVICE HOTSPOT", "Ready", COLORS["accent"])
-        self.draw_label_value("Access point", os.environ.get("DRAFTHUB_AP_SSID", "DraftHub-Setup"), 266)
-        self.draw_label_value("Setup", "http://192.168.4.1", 294)
+        self.draw_panel(pygame.Rect(58, 252, 364, 80), "DEVICE HOTSPOT", "Ready", COLORS["accent"])
+        self.draw_label_value("Access point", os.environ.get("DRAFTHUB_AP_SSID", "DraftHub-Setup"), 278)
+        self.draw_label_value("Setup", "http://192.168.4.1", 306)
         self.draw_button("WiFi settings", pygame.Rect(126, 342, 132, 32), COLORS["accent_dark"])
         self.draw_button("Refresh", pygame.Rect(268, 342, 86, 32), COLORS["panel_alt"])
+
+    def refresh_network_address(self) -> None:
+        now = time.monotonic()
+        if self.ip_address and now - self.ip_checked_at < 15:
+            return
+        self.ip_address = get_lan_ip_address()
+        self.ip_checked_at = now
 
     def draw_media(self) -> None:
         self.draw_section_title("Media", "Playback preview")
@@ -782,6 +798,56 @@ def parse_size(value: str) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         raise argparse.ArgumentTypeError("width and height must both be positive")
     return width, height
+
+
+def get_lan_ip_address() -> str:
+    override = os.environ.get("DRAFTHUB_IP_ADDRESS", "").strip()
+    if override:
+        return override
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            address = probe.getsockname()[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_DGRAM):
+            address = info[4][0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+
+    return ""
+
+
+def get_build_label() -> str:
+    version = os.environ.get("DRAFTHUB_VERSION", __version__).strip() or __version__
+    if not version.startswith("v"):
+        version = f"v{version}"
+
+    commit = os.environ.get("DRAFTHUB_BUILD", "").strip()
+    if not commit:
+        repo_root = Path(__file__).resolve().parents[2]
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            commit = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            commit = ""
+
+    return f"{version} {commit}" if commit else version
 
 
 def parse_args() -> argparse.Namespace:
