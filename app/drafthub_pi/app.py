@@ -385,7 +385,20 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
             renderPlaylist();
             autosavePlaylist();
           });
-          actions.append(play, add);
+          const remove = document.createElement("button");
+          remove.className = "secondary";
+          remove.textContent = "Delete";
+          remove.addEventListener("click", async () => {
+            if (!confirm(`Delete ${file.name} from this device?`)) return;
+            mediaStatus.textContent = `Deleting ${file.name}...`;
+            await request(`/delete?name=${encodeURIComponent(file.name)}`, { method: "POST" });
+            playlistItems = playlistItems.filter((item) => item.name !== file.name);
+            renderPlaylist();
+            await savePlaylist("Playlist saved.");
+            await refreshMedia();
+            mediaStatus.textContent = `Deleted ${file.name}`;
+          });
+          actions.append(play, add, remove);
           row.append(info, actions);
           media.append(row);
         }
@@ -1099,6 +1112,9 @@ class UploadServer:
                         return
                     self.send_text(200, "Starting playlist")
                     return
+                if parsed.path == "/delete":
+                    self.handle_delete(parsed.query)
+                    return
                 if parsed.path != "/upload":
                     self.send_error(404)
                     return
@@ -1127,6 +1143,19 @@ class UploadServer:
                     self.send_error(400, str(exc))
                     return
                 self.send_text(200, "Playlist saved")
+
+            def handle_delete(self, query_string: str) -> None:
+                query = urllib.parse.parse_qs(query_string)
+                media_name = query.get("name", [""])[0]
+                try:
+                    target_name, compressed = upload_server.validate_name(media_name)
+                    if compressed:
+                        raise ValueError("Delete the stored media name, not the .zlib transport name")
+                    upload_server.delete_media(target_name)
+                except (OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_text(200, f"Deleted {target_name}")
 
             def handle_play(self, query_string: str) -> None:
                 query = urllib.parse.parse_qs(query_string)
@@ -1189,6 +1218,24 @@ class UploadServer:
         except Exception:
             part_path.unlink(missing_ok=True)
             raise
+
+    def delete_media(self, target_name: str) -> None:
+        target_path = self.media_dir / target_name
+        if not target_path.is_file():
+            raise ValueError(f"Media file not found: {target_name}")
+        with self.playback_lock:
+            self.playback_stop.set()
+        target_path.unlink()
+        self.remove_from_playlist(target_name)
+        LOGGER.info("Deleted media path=%s", target_path)
+
+    def remove_from_playlist(self, target_name: str) -> None:
+        playlist = self.load_playlist()
+        kept = [item for item in playlist if item.name != target_name]
+        if len(kept) == len(playlist):
+            return
+        payload = {"items": [{"name": item.name, "duration": item.duration} for item in kept]}
+        self.save_playlist_json(payload)
 
     def request_playback(self, target_name: str) -> None:
         target_path = self.media_dir / target_name
