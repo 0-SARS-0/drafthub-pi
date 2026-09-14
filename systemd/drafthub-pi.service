@@ -21,7 +21,7 @@ Environment=DRAFTHUB_FRAMEBUFFER_VIEWPORT=600x600+100+100
 Environment=DRAFTHUB_FRAMEBUFFER_CLEAR=full
 Environment=DRAFTHUB_VIDEO_SIZE=800x800
 Environment=DRAFTHUB_VIDEO_VIEWPORT=800x800+0+0
-Environment=DRAFTHUB_MP4_FPS=10
+Environment=DRAFTHUB_MP4_FPS=6
 RuntimeDirectory=drafthub-pi
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/drafthub-pi

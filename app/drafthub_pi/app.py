@@ -334,7 +334,7 @@ class DraftHubApp:
         self.running = True
         self.active_view = "connection"
         self.video_size = parse_size(os.environ.get("DRAFTHUB_VIDEO_SIZE", f"{WIDTH}x{HEIGHT}"))
-        self.mp4_fps = parse_positive_int(os.environ.get("DRAFTHUB_MP4_FPS", "10"), "DRAFTHUB_MP4_FPS")
+        self.mp4_fps = parse_positive_int(os.environ.get("DRAFTHUB_MP4_FPS", "6"), "DRAFTHUB_MP4_FPS")
         self.font_small = pygame.font.Font(None, 22)
         self.font_body = pygame.font.Font(None, 26)
         self.font_heading = pygame.font.Font(None, 32)
