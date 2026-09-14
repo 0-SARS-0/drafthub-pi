@@ -334,6 +334,7 @@ class DraftHubApp:
         self.running = True
         self.active_view = "connection"
         self.video_size = parse_size(os.environ.get("DRAFTHUB_VIDEO_SIZE", f"{WIDTH}x{HEIGHT}"))
+        self.mp4_fps = parse_positive_int(os.environ.get("DRAFTHUB_MP4_FPS", "10"), "DRAFTHUB_MP4_FPS")
         self.font_small = pygame.font.Font(None, 22)
         self.font_body = pygame.font.Font(None, 26)
         self.font_heading = pygame.font.Font(None, 32)
@@ -355,7 +356,7 @@ class DraftHubApp:
                     continue
                 try:
                     if playback_path.suffix.lower() == ".mp4":
-                        FfmpegMp4Player(playback_path, *self.video_size, 30).run(
+                        FfmpegMp4Player(playback_path, *self.video_size, self.mp4_fps).run(
                             self.framebuffer,
                             self.upload_server.playback_stop,
                         )
@@ -1139,6 +1140,16 @@ def parse_size(value: str) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         raise argparse.ArgumentTypeError("width and height must both be positive")
     return width, height
+
+
+def parse_positive_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
 
 
 def get_lan_ip_address() -> str:
