@@ -223,6 +223,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const fileInput = document.querySelector("#file");
     let mediaFiles = [];
     let playlistItems = [];
+    let playlistSaveTimer = 0;
     document.querySelector("#device-url").textContent = `http://${location.host}`;
 
     function sizeLabel(bytes) {
@@ -244,6 +245,27 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
 
     function isImage(name) {
       return name.match(/\\.(png|jpg|jpeg)$/i);
+    }
+
+    async function savePlaylist(statusText = "Playlist saved.") {
+      await request("/playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: playlistItems }),
+      });
+      playlistStatus.textContent = statusText;
+    }
+
+    function autosavePlaylist() {
+      clearTimeout(playlistSaveTimer);
+      playlistStatus.textContent = "Saving...";
+      playlistSaveTimer = setTimeout(async () => {
+        try {
+          await savePlaylist("Playlist saved.");
+        } catch (error) {
+          playlistStatus.textContent = `Error: ${error.message}`;
+        }
+      }, 350);
     }
 
     function renderPlaylist() {
@@ -277,6 +299,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         duration.title = "Seconds";
         duration.addEventListener("change", () => {
           playlistItems[index].duration = Math.max(1, Number(duration.value) || 1);
+          autosavePlaylist();
         });
         const up = document.createElement("button");
         up.textContent = "Up";
@@ -284,6 +307,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         up.addEventListener("click", () => {
           [playlistItems[index - 1], playlistItems[index]] = [playlistItems[index], playlistItems[index - 1]];
           renderPlaylist();
+          autosavePlaylist();
         });
         const down = document.createElement("button");
         down.textContent = "Down";
@@ -291,6 +315,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         down.addEventListener("click", () => {
           [playlistItems[index], playlistItems[index + 1]] = [playlistItems[index + 1], playlistItems[index]];
           renderPlaylist();
+          autosavePlaylist();
         });
         const remove = document.createElement("button");
         remove.className = "secondary";
@@ -298,6 +323,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         remove.addEventListener("click", () => {
           playlistItems.splice(index, 1);
           renderPlaylist();
+          autosavePlaylist();
         });
         actions.append(duration, up, down, remove);
         row.append(info, actions);
@@ -357,6 +383,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
           add.addEventListener("click", () => {
             playlistItems.push({ name: file.name, duration: isImage(file.name) ? 10 : 0 });
             renderPlaylist();
+            autosavePlaylist();
           });
           actions.append(play, add);
           row.append(info, actions);
@@ -392,22 +419,20 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     });
 
     savePlaylistButton.addEventListener("click", async () => {
+      clearTimeout(playlistSaveTimer);
       playlistStatus.textContent = "Saving...";
       try {
-        await request("/playlist", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: playlistItems }),
-        });
-        playlistStatus.textContent = "Playlist saved.";
+        await savePlaylist("Playlist saved.");
       } catch (error) {
         playlistStatus.textContent = `Error: ${error.message}`;
       }
     });
 
     playPlaylistButton.addEventListener("click", async () => {
+      clearTimeout(playlistSaveTimer);
       playlistStatus.textContent = "Starting playlist...";
       try {
+        await savePlaylist("Playlist saved.");
         await request("/play-playlist", { method: "POST" });
         playlistStatus.textContent = "Playlist playing.";
       } catch (error) {
