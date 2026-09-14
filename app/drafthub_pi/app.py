@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
 import mmap
@@ -35,6 +36,248 @@ LOGO_SIZE = (156, 40)
 DEFAULT_FRAMEBUFFER_VIEWPORT = "480x480+0+0"
 DEFAULT_MEDIA_DIR = Path("/var/lib/drafthub/media")
 DEFAULT_UPLOAD_PORT = 8080
+MANAGER_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DraftHub Manager</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Arial, Helvetica, sans-serif;
+      background: #081c32;
+      color: #eef6fb;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #081c32;
+    }
+    main {
+      box-sizing: border-box;
+      width: min(760px, 100%);
+      margin: 0 auto;
+      padding: 24px 18px 40px;
+    }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid #366c96;
+      padding-bottom: 14px;
+      margin-bottom: 22px;
+    }
+    h1 {
+      font-size: 28px;
+      line-height: 1.1;
+      margin: 0;
+    }
+    .build {
+      color: #a4c2d6;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    section {
+      border: 1px solid #366c96;
+      background: #0f365b;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 14px 0;
+    }
+    h2 {
+      font-size: 18px;
+      margin: 0 0 12px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-top: 1px solid rgba(164, 194, 214, 0.25);
+      padding: 12px 0;
+    }
+    .row:first-child {
+      border-top: 0;
+    }
+    .name {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .meta {
+      color: #a4c2d6;
+      font-size: 13px;
+      margin-top: 3px;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    button,
+    input::file-selector-button {
+      border: 1px solid #366c96;
+      border-radius: 6px;
+      background: #127a9e;
+      color: #eef6fb;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 9px 12px;
+    }
+    button.secondary {
+      background: #0c2b48;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
+    input[type="file"] {
+      width: 100%;
+      margin-bottom: 12px;
+    }
+    .status {
+      color: #a4c2d6;
+      min-height: 20px;
+      margin-top: 10px;
+    }
+    .empty {
+      color: #a4c2d6;
+      padding: 12px 0 2px;
+    }
+    @media (max-width: 560px) {
+      header,
+      .row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .actions {
+        width: 100%;
+      }
+      .actions button {
+        flex: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>DraftHub Manager</h1>
+        <div class="meta" id="device-url"></div>
+      </div>
+      <div class="build">__BUILD_LABEL__</div>
+    </header>
+
+    <section>
+      <h2>Upload Media</h2>
+      <input id="file" type="file" accept=".vid,.rgb565,.mp4,.zlib">
+      <button id="upload">Upload</button>
+      <div class="status" id="upload-status"></div>
+    </section>
+
+    <section>
+      <h2>On-Device Media</h2>
+      <div id="media"></div>
+      <div class="status" id="media-status"></div>
+    </section>
+  </main>
+
+  <script>
+    const media = document.querySelector("#media");
+    const mediaStatus = document.querySelector("#media-status");
+    const uploadStatus = document.querySelector("#upload-status");
+    const uploadButton = document.querySelector("#upload");
+    const fileInput = document.querySelector("#file");
+    document.querySelector("#device-url").textContent = `http://${location.host}`;
+
+    function sizeLabel(bytes) {
+      if (bytes > 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+      if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+      if (bytes > 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${bytes} B`;
+    }
+
+    async function request(path, options = {}) {
+      const response = await fetch(path, options);
+      if (!response.ok) throw new Error(await response.text() || response.statusText);
+      return response;
+    }
+
+    async function refreshMedia() {
+      mediaStatus.textContent = "Refreshing...";
+      try {
+        const response = await request("/media-index");
+        const payload = await response.json();
+        media.replaceChildren();
+        if (!payload.files.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No media uploaded yet.";
+          media.append(empty);
+        }
+        for (const file of payload.files) {
+          const row = document.createElement("div");
+          row.className = "row";
+          const info = document.createElement("div");
+          const name = document.createElement("div");
+          name.className = "name";
+          name.textContent = file.name;
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = sizeLabel(file.size);
+          info.append(name, meta);
+
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          const play = document.createElement("button");
+          play.textContent = "Play";
+          play.disabled = !file.name.match(/\\.(vid|mp4)$/i);
+          play.addEventListener("click", async () => {
+            mediaStatus.textContent = `Starting ${file.name}...`;
+            await request(`/play?name=${encodeURIComponent(file.name)}`, { method: "POST" });
+            mediaStatus.textContent = `Playing ${file.name}`;
+          });
+          actions.append(play);
+          row.append(info, actions);
+          media.append(row);
+        }
+        mediaStatus.textContent = "";
+      } catch (error) {
+        mediaStatus.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    uploadButton.addEventListener("click", async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        uploadStatus.textContent = "Choose a file first.";
+        return;
+      }
+      uploadButton.disabled = true;
+      uploadStatus.textContent = `Uploading ${file.name}...`;
+      try {
+        await request(`/upload?name=${encodeURIComponent(file.name)}`, {
+          method: "POST",
+          body: file,
+        });
+        uploadStatus.textContent = `Uploaded ${file.name}`;
+        fileInput.value = "";
+        await refreshMedia();
+      } catch (error) {
+        uploadStatus.textContent = `Error: ${error.message}`;
+      } finally {
+        uploadButton.disabled = false;
+      }
+    });
+
+    refreshMedia();
+  </script>
+</body>
+</html>
+"""
 
 COLORS = {
     "background": (8, 28, 50),
@@ -533,8 +776,16 @@ class UploadServer:
                 self.end_headers()
 
             def do_GET(self) -> None:
-                if urllib.parse.urlparse(self.path).path != "/media-index":
-                    self.send_error(404)
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path in ("", "/", "/manage"):
+                    self.send_manager_page()
+                    return
+                if parsed.path == "/favicon.ico":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                if parsed.path != "/media-index":
+                    self.send_error(404, "Not Found")
                     return
                 files = [
                     {"name": path.name, "size": path.stat().st_size}
@@ -545,6 +796,19 @@ class UploadServer:
                 self.send_response(200)
                 self.send_cors_headers()
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def send_manager_page(self) -> None:
+                page = MANAGER_PAGE_TEMPLATE.replace(
+                    "__BUILD_LABEL__",
+                    html.escape(get_build_label()),
+                )
+                payload = page.encode("utf-8")
+                self.send_response(200)
+                self.send_cors_headers()
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
