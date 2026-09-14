@@ -703,6 +703,36 @@ class FramebufferPresenter:
             return
         self.present(frame_surface, self.video_viewport)
 
+    def video_pixel_format(self) -> tuple[str, int]:
+        if self.bits_per_pixel == 32:
+            return "bgr0", 4
+        return "rgb565le", 2
+
+    def present_video_frame(self, frame: bytes | memoryview, width: int, height: int, pixel_format: str) -> None:
+        if pixel_format == "bgr0":
+            self.present_bgrx(frame, width, height)
+            return
+        self.present_rgb565(frame, width, height)
+
+    def present_bgrx(self, frame: bytes | memoryview, width: int, height: int) -> None:
+        if self.bits_per_pixel != 32:
+            raise RuntimeError("bgr0 playback requires a 32-bit framebuffer")
+        if width != self.video_viewport.width or height != self.video_viewport.height:
+            raise RuntimeError("bgr0 playback must match the configured video viewport")
+
+        row_bytes = width * 4
+        if self.video_viewport.x == 0 and self.video_viewport.y == 0 and self.stride == row_bytes:
+            self.buffer.seek(0)
+            self.buffer.write(frame)
+            return
+
+        for row in range(height):
+            source_offset = row * row_bytes
+            self.buffer.seek(
+                (self.video_viewport.y + row) * self.stride + self.video_viewport.x * 4
+            )
+            self.buffer.write(frame[source_offset : source_offset + row_bytes])
+
     def get_rgb565_surface(self, width: int, height: int) -> pygame.Surface:
         size = (width, height)
         if self.rgb565_surface_cache is None or self.rgb565_surface_cache_size != size:
@@ -1015,7 +1045,6 @@ class FfmpegMp4Player:
         self.width = width
         self.height = height
         self.fps = fps
-        self.frame_bytes = width * height * 2
         self.ffmpeg = self.resolve_ffmpeg()
 
     @staticmethod
@@ -1026,6 +1055,8 @@ class FfmpegMp4Player:
         return ffmpeg
 
     def run(self, presenter: FramebufferPresenter, stop_event: threading.Event | None = None) -> None:
+        pixel_format, bytes_per_pixel = presenter.video_pixel_format()
+        frame_bytes = self.width * self.height * bytes_per_pixel
         video_filter = (
             f"fps={self.fps},"
             f"scale={self.width}:{self.height}:force_original_aspect_ratio=increase,"
@@ -1044,38 +1075,39 @@ class FfmpegMp4Player:
             "-vf",
             video_filter,
             "-pix_fmt",
-            "rgb565le",
+            pixel_format,
             "-f",
             "rawvideo",
             "-",
         ]
         LOGGER.info(
-            "Playing MP4 path=%s size=%sx%s fps=%s loop=True ffmpeg=%s",
+            "Playing MP4 path=%s size=%sx%s fps=%s pixel_format=%s loop=True ffmpeg=%s",
             self.path,
             self.width,
             self.height,
             self.fps,
+            pixel_format,
             self.ffmpeg,
         )
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=self.frame_bytes * 2,
+            bufsize=frame_bytes * 2,
         )
         assert process.stdout is not None
         pacer = FramePacer(self.fps)
         frame_count = 0
         skipped_frames = 0
         measured_from = time.monotonic()
-        frame_buffer = bytearray(self.frame_bytes)
+        frame_buffer = bytearray(frame_bytes)
         frame_view = memoryview(frame_buffer)
         try:
             while stop_event is None or not stop_event.is_set():
                 if not read_exact_into(process.stdout, frame_view):
                     stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                     raise RuntimeError(f"ffmpeg ended before a complete frame was available: {stderr.strip()}")
-                presenter.present_rgb565(frame_view, self.width, self.height)
+                presenter.present_video_frame(frame_view, self.width, self.height, pixel_format)
                 frame_count += 1
                 skipped_frames += pacer.wait()
                 now = time.monotonic()
