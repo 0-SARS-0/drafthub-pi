@@ -210,6 +210,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       <div class="playlist-controls">
         <button id="save-playlist">Save</button>
         <button id="play-playlist">Play Playlist</button>
+        <button id="stop-playlist" class="secondary">Stop Playlist</button>
       </div>
       <div class="status" id="playlist-status"></div>
     </section>
@@ -231,6 +232,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const uploadButton = document.querySelector("#upload");
     const savePlaylistButton = document.querySelector("#save-playlist");
     const playPlaylistButton = document.querySelector("#play-playlist");
+    const stopPlaylistButton = document.querySelector("#stop-playlist");
     const fileInput = document.querySelector("#file");
     let mediaFiles = [];
     let playlistItems = [];
@@ -498,6 +500,17 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         await savePlaylist("Playlist saved.");
         await request("/play-playlist", { method: "POST" });
         playlistStatus.textContent = "Playlist playing.";
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    });
+
+    stopPlaylistButton.addEventListener("click", async () => {
+      clearTimeout(playlistSaveTimer);
+      playlistStatus.textContent = "Stopping playlist...";
+      try {
+        await request("/stop", { method: "POST" });
+        playlistStatus.textContent = "Playlist stopped.";
       } catch (error) {
         playlistStatus.textContent = `Error: ${error.message}`;
       }
