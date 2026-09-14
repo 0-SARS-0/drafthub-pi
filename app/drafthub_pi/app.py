@@ -918,6 +918,24 @@ class UploadServer:
             return playback_path
 
 
+class FramePacer:
+    def __init__(self, fps: int) -> None:
+        self.frame_period = 1 / fps
+        self.next_frame_at = time.perf_counter()
+
+    def wait(self) -> int:
+        self.next_frame_at += self.frame_period
+        remaining = self.next_frame_at - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
+            return 0
+        if remaining < -self.frame_period:
+            missed_frames = int(-remaining / self.frame_period)
+            self.next_frame_at += missed_frames * self.frame_period
+            return missed_frames
+        return 0
+
+
 class RawVidPlayer:
     def __init__(self, path: Path, width: int, height: int, fps: int) -> None:
         self.path = path
@@ -944,29 +962,51 @@ class RawVidPlayer:
             self.fps,
             self.frame_count,
         )
-        frame_period = 1 / self.fps
+        pacer = FramePacer(self.fps)
         frame_count = 0
+        skipped_frames = 0
         measured_from = time.monotonic()
-        while stop_event is None or not stop_event.is_set():
-            with self.path.open("rb") as vid_file:
-                for _frame_index in range(self.frame_count):
-                    if stop_event is not None and stop_event.is_set():
-                        LOGGER.info("VID playback stopped")
-                        return
-                    started = time.monotonic()
-                    frame = vid_file.read(self.frame_bytes)
-                    if len(frame) != self.frame_bytes:
-                        raise OSError(f"Short read while playing {self.path}")
-                    presenter.present_rgb565(frame, self.width, self.height)
-                    frame_count += 1
-                    now = time.monotonic()
-                    if now - measured_from >= 5:
-                        LOGGER.info("VID display fps=%.1f", frame_count / (now - measured_from))
-                        frame_count = 0
-                        measured_from = now
-                    remaining = frame_period - (time.monotonic() - started)
-                    if remaining > 0:
-                        time.sleep(remaining)
+        with self.path.open("rb") as vid_file:
+            with mmap.mmap(vid_file.fileno(), 0, access=mmap.ACCESS_READ) as video:
+                frames = memoryview(video)
+                frame_index = 0
+                try:
+                    while stop_event is None or not stop_event.is_set():
+                        start = frame_index * self.frame_bytes
+                        frame = frames[start : start + self.frame_bytes]
+                        presenter.present_rgb565(frame, self.width, self.height)
+                        frame.release()
+                        frame_count += 1
+                        frame_index = (frame_index + 1) % self.frame_count
+                        missed_frames = pacer.wait()
+                        if missed_frames:
+                            skipped_frames += missed_frames
+                            frame_index = (frame_index + missed_frames) % self.frame_count
+                        now = time.monotonic()
+                        if now - measured_from >= 5:
+                            LOGGER.info(
+                                "VID display fps=%.1f skipped=%s",
+                                frame_count / (now - measured_from),
+                                skipped_frames,
+                            )
+                            frame_count = 0
+                            skipped_frames = 0
+                            measured_from = now
+                finally:
+                    frames.release()
+        if stop_event is not None and stop_event.is_set():
+            LOGGER.info("VID playback stopped")
+
+
+def read_exact_into(source, target: memoryview) -> bool:
+    offset = 0
+    target_length = len(target)
+    while offset < target_length:
+        read_count = source.readinto(target[offset:])
+        if not read_count:
+            return False
+        offset += read_count
+    return True
 
 
 class FfmpegMp4Player:
@@ -1024,27 +1064,32 @@ class FfmpegMp4Player:
             bufsize=self.frame_bytes * 2,
         )
         assert process.stdout is not None
-        frame_period = 1 / self.fps
+        pacer = FramePacer(self.fps)
         frame_count = 0
+        skipped_frames = 0
         measured_from = time.monotonic()
+        frame_buffer = bytearray(self.frame_bytes)
+        frame_view = memoryview(frame_buffer)
         try:
             while stop_event is None or not stop_event.is_set():
-                started = time.monotonic()
-                frame = process.stdout.read(self.frame_bytes)
-                if len(frame) != self.frame_bytes:
+                if not read_exact_into(process.stdout, frame_view):
                     stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
                     raise RuntimeError(f"ffmpeg ended before a complete frame was available: {stderr.strip()}")
-                presenter.present_rgb565(frame, self.width, self.height)
+                presenter.present_rgb565(frame_view, self.width, self.height)
                 frame_count += 1
+                skipped_frames += pacer.wait()
                 now = time.monotonic()
                 if now - measured_from >= 5:
-                    LOGGER.info("MP4 display fps=%.1f", frame_count / (now - measured_from))
+                    LOGGER.info(
+                        "MP4 display fps=%.1f skipped=%s",
+                        frame_count / (now - measured_from),
+                        skipped_frames,
+                    )
                     frame_count = 0
+                    skipped_frames = 0
                     measured_from = now
-                remaining = frame_period - (time.monotonic() - started)
-                if remaining > 0:
-                    time.sleep(remaining)
         finally:
+            frame_view.release()
             process.terminate()
             try:
                 process.wait(timeout=2)
