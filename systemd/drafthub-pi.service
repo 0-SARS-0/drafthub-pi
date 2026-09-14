@@ -1,13 +1,29 @@
 [Unit]
-Description=DraftHub Pi touchscreen application
+Description=DraftHub touchscreen application
 After=network-online.target
 Wants=network-online.target
+Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
-User=raspberry
+User=drafthub
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
 WorkingDirectory=/opt/drafthub-pi
 Environment=PYTHONPATH=/opt/drafthub-pi/app
+Environment=PYTHONUNBUFFERED=1
+Environment=DRAFTHUB_FRAMEBUFFER_VIEWPORT=600x600+100+100
+Environment=DRAFTHUB_FRAMEBUFFER_CLEAR=full
+Environment=DRAFTHUB_VIDEO_SIZE=800x800
+Environment=DRAFTHUB_VIDEO_VIEWPORT=800x800+0+0
+RuntimeDirectory=drafthub-pi
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/drafthub-pi
 ExecStart=/usr/bin/python3 -m drafthub_pi
 Restart=always
 RestartSec=2

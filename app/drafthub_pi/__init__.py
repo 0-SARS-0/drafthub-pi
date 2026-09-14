@@ -1,2 +1,1 @@
-"""DraftHub Pi touchscreen application."""
-
+"""DraftHub touchscreen application."""
