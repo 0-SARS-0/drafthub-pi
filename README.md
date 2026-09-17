@@ -241,6 +241,28 @@ device 1 to device 2. This first shared-wall implementation is for text
 messages; synchronized multi-device video can build on the same peer/config
 model once the media files are present on every device.
 
+## Shared Hub Management
+
+One DraftHub manager can act as the local hub for the group. Use the same
+`Managed device URLs` box in the Shared Wall section to list every other player
+on the venue network, one URL per line.
+
+From the hub manager you can then:
+
+- upload a media file locally and sync it to all managed devices with
+  `Upload To All Devices`
+- save the local playlist and push the same playlist to all managed devices with
+  `Sync To All Devices`
+- start the synced playlist on the hub plus every managed device with
+  `Play On All Devices`
+- send a shared scrolling wall message across the same managed device group
+
+This gives one point of control for media and imagery on a local network. The
+current hub model is deliberately local-first: each device still stores its own
+copy of media, and the hub pushes files/playlist commands over HTTP to the
+other DraftHub managers. That keeps playback resilient if the hub disappears
+after content has been synced.
+
 ## Dual Wi-Fi Test Procedure
 
 After enabling networking, verify:

@@ -12,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+import http.client
 import urllib.parse
 import urllib.request
 import zlib
@@ -242,7 +243,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         <input id="wall-count" type="number" min="1" max="32" title="Total devices" placeholder="Total">
       </div>
       <div class="field-row">
-        <textarea id="wall-peers" placeholder="Peer manager URLs, one per line, for example http://192.168.0.64:8080"></textarea>
+        <textarea id="wall-peers" placeholder="Managed device URLs, one per line, for example http://192.168.0.64:8080"></textarea>
       </div>
       <div class="field-row">
         <input id="wall-message" type="text" placeholder="Shared scrolling message">
@@ -262,6 +263,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       <h2>Upload Media</h2>
       <input id="file" type="file" accept=".vid,.rgb565,.mp4,.png,.jpg,.jpeg,.zlib">
       <button id="upload">Upload</button>
+      <button id="upload-all" class="secondary">Upload To All Devices</button>
       <progress id="upload-progress" max="100" value="0" hidden></progress>
       <div class="status" id="upload-status"></div>
     </section>
@@ -272,6 +274,8 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       <div class="playlist-controls">
         <button id="save-playlist">Save</button>
         <button id="play-playlist">Play Playlist</button>
+        <button id="sync-playlist" class="secondary">Sync To All Devices</button>
+        <button id="play-playlist-all">Play On All Devices</button>
         <button id="stop-playlist" class="secondary">Stop Playlist</button>
       </div>
       <div class="status" id="playlist-status"></div>
@@ -293,6 +297,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const uploadStatus = document.querySelector("#upload-status");
     const uploadProgress = document.querySelector("#upload-progress");
     const uploadButton = document.querySelector("#upload");
+    const uploadAllButton = document.querySelector("#upload-all");
     const wifiSummary = document.querySelector("#wifi-summary");
     const wifiStatus = document.querySelector("#wifi-status");
     const wifiSsid = document.querySelector("#wifi-ssid");
@@ -309,6 +314,8 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const wallStatus = document.querySelector("#wall-status");
     const savePlaylistButton = document.querySelector("#save-playlist");
     const playPlaylistButton = document.querySelector("#play-playlist");
+    const syncPlaylistButton = document.querySelector("#sync-playlist");
+    const playPlaylistAllButton = document.querySelector("#play-playlist-all");
     const stopPlaylistButton = document.querySelector("#stop-playlist");
     const fileInput = document.querySelector("#file");
     let mediaFiles = [];
@@ -398,6 +405,10 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         body: JSON.stringify(payload),
       });
       return payload;
+    }
+
+    function managedDeviceUrls() {
+      return wallPeers.value.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
     }
 
     function uploadFile(file) {
@@ -631,6 +642,34 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       }
     });
 
+    uploadAllButton.addEventListener("click", async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        uploadStatus.textContent = "Choose a file first.";
+        return;
+      }
+      uploadAllButton.disabled = true;
+      uploadButton.disabled = true;
+      uploadProgress.hidden = false;
+      uploadProgress.value = 0;
+      uploadStatus.textContent = `Uploading ${file.name} to hub and managed devices...`;
+      try {
+        await saveWallConfig();
+        await uploadFile(file);
+        const response = await request(`/hub-sync-media?name=${encodeURIComponent(file.name)}`, { method: "POST" });
+        const payload = await response.json();
+        uploadProgress.value = 100;
+        uploadStatus.textContent = `Uploaded locally and synced to ${payload.synced} device(s).`;
+        fileInput.value = "";
+        await refreshMedia();
+      } catch (error) {
+        uploadStatus.textContent = `Error: ${error.message}`;
+      } finally {
+        uploadButton.disabled = false;
+        uploadAllButton.disabled = false;
+      }
+    });
+
     wifiScanButton.addEventListener("click", scanWifi);
 
     wifiConnectButton.addEventListener("click", async () => {
@@ -705,6 +744,34 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
         await savePlaylist("Playlist saved.");
         await request("/play-playlist", { method: "POST" });
         playlistStatus.textContent = "Playlist playing.";
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    });
+
+    syncPlaylistButton.addEventListener("click", async () => {
+      clearTimeout(playlistSaveTimer);
+      playlistStatus.textContent = "Syncing playlist...";
+      try {
+        await savePlaylist("Playlist saved.");
+        await saveWallConfig();
+        const response = await request("/hub-sync-playlist", { method: "POST" });
+        const payload = await response.json();
+        playlistStatus.textContent = `Playlist synced to ${payload.synced} device(s).`;
+      } catch (error) {
+        playlistStatus.textContent = `Error: ${error.message}`;
+      }
+    });
+
+    playPlaylistAllButton.addEventListener("click", async () => {
+      clearTimeout(playlistSaveTimer);
+      playlistStatus.textContent = "Starting playlist on all devices...";
+      try {
+        await savePlaylist("Playlist saved.");
+        await saveWallConfig();
+        const response = await request("/hub-play-playlist", { method: "POST" });
+        const payload = await response.json();
+        playlistStatus.textContent = `Playlist started on ${payload.started} device(s).`;
       } catch (error) {
         playlistStatus.textContent = `Error: ${error.message}`;
       }
@@ -1427,6 +1494,15 @@ class UploadServer:
                 if parsed.path == "/wall-message":
                     self.handle_wall_message()
                     return
+                if parsed.path == "/hub-sync-media":
+                    self.handle_hub_sync_media(parsed.query)
+                    return
+                if parsed.path == "/hub-sync-playlist":
+                    self.handle_hub_sync_playlist()
+                    return
+                if parsed.path == "/hub-play-playlist":
+                    self.handle_hub_play_playlist()
+                    return
                 if parsed.path == "/play-playlist":
                     try:
                         upload_server.request_playlist_playback()
@@ -1490,6 +1566,32 @@ class UploadServer:
                     payload = self.read_json_body("Wall message body is empty")
                     result = upload_server.request_wall_message(payload)
                 except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_json(result)
+
+            def handle_hub_sync_media(self, query_string: str) -> None:
+                query = urllib.parse.parse_qs(query_string)
+                media_name = query.get("name", [""])[0]
+                try:
+                    result = upload_server.sync_media_to_peers(media_name)
+                except (OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_json(result)
+
+            def handle_hub_sync_playlist(self) -> None:
+                try:
+                    result = upload_server.sync_playlist_to_peers()
+                except (OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_json(result)
+
+            def handle_hub_play_playlist(self) -> None:
+                try:
+                    result = upload_server.play_playlist_on_peers()
+                except (OSError, ValueError) as exc:
                     self.send_error(400, str(exc))
                     return
                 self.send_json(result)
@@ -1712,6 +1814,110 @@ class UploadServer:
         with urllib.request.urlopen(request, timeout=3) as response:
             if response.status >= 400:
                 raise OSError(f"HTTP {response.status}")
+
+    def peer_urls(self) -> list[str]:
+        return [str(peer) for peer in self.load_wall_config()["peers"]]
+
+    def sync_media_to_peers(self, media_name: str) -> dict[str, object]:
+        target_name, compressed = self.validate_name(media_name)
+        if compressed:
+            raise ValueError("Sync the stored media name, not the .zlib transport name")
+        media_path = self.media_dir / target_name
+        if not media_path.is_file():
+            raise ValueError(f"Media file not found: {target_name}")
+        synced = 0
+        errors: list[str] = []
+        for peer in self.peer_urls():
+            try:
+                self.upload_file_to_peer(peer, media_path, target_name)
+                synced += 1
+            except OSError as exc:
+                errors.append(f"{peer}: {exc}")
+        return {"ok": True, "synced": synced, "errors": errors}
+
+    def sync_playlist_to_peers(self) -> dict[str, object]:
+        payload = {"items": self.load_playlist_json()}
+        synced = 0
+        errors: list[str] = []
+        for peer in self.peer_urls():
+            try:
+                self.post_json_to_peer(peer, "/playlist", payload)
+                synced += 1
+            except OSError as exc:
+                errors.append(f"{peer}: {exc}")
+        return {"ok": True, "synced": synced, "errors": errors}
+
+    def play_playlist_on_peers(self) -> dict[str, object]:
+        self.request_playlist_playback()
+        self.sync_playlist_to_peers()
+        started = 1
+        errors: list[str] = []
+        for peer in self.peer_urls():
+            try:
+                self.post_empty_to_peer(peer, "/play-playlist")
+                started += 1
+            except OSError as exc:
+                errors.append(f"{peer}: {exc}")
+        return {"ok": True, "started": started, "errors": errors}
+
+    def peer_connection(self, peer_url: str) -> tuple[http.client.HTTPConnection, str]:
+        base_url = peer_url.rstrip("/")
+        if not base_url.startswith(("http://", "https://")):
+            base_url = f"http://{base_url}"
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise OSError(f"Bad peer URL: {peer_url}")
+        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        base_path = parsed.path.rstrip("/")
+        return connection_class(parsed.netloc, timeout=10), base_path
+
+    def upload_file_to_peer(self, peer_url: str, media_path: Path, target_name: str) -> None:
+        connection, base_path = self.peer_connection(peer_url)
+        upload_path = f"{base_path}/upload?name={urllib.parse.quote(target_name)}"
+        connection.putrequest("POST", upload_path)
+        connection.putheader("Content-Length", str(media_path.stat().st_size))
+        connection.endheaders()
+        try:
+            with media_path.open("rb") as source:
+                while True:
+                    chunk = source.read(256 * 1024)
+                    if not chunk:
+                        break
+                    connection.send(chunk)
+            response = connection.getresponse()
+            response.read()
+            if response.status >= 400:
+                raise OSError(f"HTTP {response.status}")
+        finally:
+            connection.close()
+
+    def post_json_to_peer(self, peer_url: str, path: str, payload: object) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        connection, base_path = self.peer_connection(peer_url)
+        try:
+            connection.request(
+                "POST",
+                f"{base_path}{path}",
+                body=body,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            )
+            response = connection.getresponse()
+            response.read()
+            if response.status >= 400:
+                raise OSError(f"HTTP {response.status}")
+        finally:
+            connection.close()
+
+    def post_empty_to_peer(self, peer_url: str, path: str) -> None:
+        connection, base_path = self.peer_connection(peer_url)
+        try:
+            connection.request("POST", f"{base_path}{path}", body=b"", headers={"Content-Length": "0"})
+            response = connection.getresponse()
+            response.read()
+            if response.status >= 400:
+                raise OSError(f"HTTP {response.status}")
+        finally:
+            connection.close()
 
     def take_playback_request(self) -> PlaybackRequest | None:
         with self.playback_lock:
