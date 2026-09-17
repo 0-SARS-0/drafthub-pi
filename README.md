@@ -48,7 +48,7 @@ also providing a local management AP:
 
 ```text
 Venue Wi-Fi / Internet -> Radxa STA
-DraftHub-XXXX -> Radxa AP at http://192.168.50.1:8080/manage
+DraftHub-XXXX -> Radxa AP at http://10.77.x.1:8080/manage
 ```
 
 Enable it explicitly from the device:
@@ -64,9 +64,13 @@ This installs `network-manager`, `dnsmasq-base`, and `iw`, then enables:
   NetworkManager AP profile
 - `drafthub-ap-dnsmasq.service` to provide DHCP/DNS only on the DraftHub AP
 
-The AP uses `192.168.50.1/24` and does not set up NAT or routing to the venue
-LAN. Cloud traffic should continue to use the venue Wi-Fi default route. The AP
-SSID and generated WPA password are stored root-only in:
+Each device derives a stable ID from its Wi-Fi MAC address. That ID is used for
+the AP SSID, for example `DraftHub-A7F3`, and for a per-device management subnet
+in the `10.77.x.0/24` range. This avoids multiple DraftHub units all claiming
+the same AP address when they are commissioned or maintained side by side. The
+AP does not set up NAT or routing to the venue LAN. Cloud traffic should
+continue to use the venue Wi-Fi default route. The AP SSID, AP subnet, device
+name, and generated WPA password are stored root-only in:
 
 ```text
 /etc/drafthub/network.json
@@ -226,8 +230,9 @@ ip route
 
 Test cases:
 
-- Fresh device with no venue profile: `DraftHub-XXXX` SSID is visible and
-  `http://192.168.50.1:8080/manage` loads after joining it.
+- Fresh device with no venue profile: its unique `DraftHub-XXXX` SSID is visible
+  and `http://<device-ap-address>:8080/manage` loads after joining it. The AP
+  address is shown by `sudo /usr/local/sbin/drafthub-network status`.
 - Successful venue provisioning: scan, select SSID, enter password, and confirm
   the manager shows the venue SSID plus Internet online.
 - Incorrect venue password: connection reports failure and the DraftHub AP stays
@@ -238,7 +243,8 @@ Test cases:
   offline but the player and AP remain available.
 - Venue password changes: connect to the DraftHub AP, submit the new password,
   and confirm reconnection without SSH.
-- Reboot: `DraftHub-XXXX` returns, DHCP works, and the venue profile reconnects.
+- Reboot: the unique `DraftHub-XXXX` SSID returns, DHCP works, and the venue
+  profile reconnects.
 - Simultaneous AP + STA: `iw dev` shows the venue managed interface and `dhap0`
   AP interface at the same time.
 - Cloud/default traffic: `ip route` default route points at the venue Wi-Fi

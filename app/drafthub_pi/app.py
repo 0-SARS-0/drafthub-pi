@@ -209,7 +209,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
   <main>
     <header>
       <div>
-        <h1>DraftHub Manager</h1>
+        <h1 id="device-title">DraftHub Manager</h1>
         <div class="meta" id="device-url"></div>
       </div>
       <div class="build">__BUILD_LABEL__</div>
@@ -258,6 +258,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
   <script>
     const media = document.querySelector("#media");
     const mediaStatus = document.querySelector("#media-status");
+    const deviceTitle = document.querySelector("#device-title");
     const playlist = document.querySelector("#playlist");
     const playlistStatus = document.querySelector("#playlist-status");
     const uploadStatus = document.querySelector("#upload-status");
@@ -292,10 +293,15 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     }
 
     function renderWifiStatus(payload) {
+      if (payload.device_name) {
+        deviceTitle.textContent = `${payload.device_name} Manager`;
+      }
       const ap = payload.ap_ssid ? `${payload.ap_ssid} (${payload.ap_address})` : "not configured";
       const venue = payload.venue_ssid || "not connected";
       const internet = payload.internet ? "online" : "offline";
-      wifiSummary.textContent = `DraftHub AP: ${ap} | Venue Wi-Fi: ${venue} | Internet: ${internet}`;
+      const ips = (payload.local_addresses || []).map((item) => `${item.interface}: ${item.address}`).join(", ") || "none";
+      const identity = payload.device_id ? `Device: ${payload.device_id}` : "Device: unknown";
+      wifiSummary.textContent = `${identity} | IPs: ${ips} | DraftHub AP: ${ap} | Venue Wi-Fi: ${venue} | Internet: ${internet}`;
       if (!payload.network_manager) {
         wifiStatus.textContent = "Network setup is not enabled on this device yet.";
       }
@@ -1453,12 +1459,16 @@ class UploadServer:
                     "network_manager": False,
                     "dnsmasq": False,
                     "capability": {"available": False, "reason": "DraftHub network helper is not installed"},
+                    "device_id": None,
+                    "device_name": None,
                     "managed_interface": None,
                     "ap_interface": None,
                     "ap_ssid": None,
-                    "ap_address": "192.168.50.1",
+                    "ap_address": "10.77.50.1",
+                    "ap_subnet": "10.77.50.0/24",
                     "venue_ssid": None,
                     "active_connections": [],
+                    "local_addresses": [],
                     "default_route": "",
                     "internet": False,
                 }

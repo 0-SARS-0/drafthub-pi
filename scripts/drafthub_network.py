@@ -17,9 +17,8 @@ DNSMASQ_CONFIG_PATH = CONFIG_DIR / "dnsmasq-ap.conf"
 AP_CONNECTION = "DraftHub Management AP"
 VENUE_CONNECTION = "DraftHub Venue Wi-Fi"
 AP_INTERFACE = "dhap0"
-AP_ADDRESS = "192.168.50.1"
-AP_CIDR = f"{AP_ADDRESS}/24"
-AP_RANGE = "192.168.50.20,192.168.50.120,12h"
+DEFAULT_AP_ADDRESS = "10.77.50.1"
+DEFAULT_AP_RANGE = "10.77.50.20,10.77.50.120,12h"
 
 
 def run(command: list[str], *, check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -95,24 +94,50 @@ def read_mac(interface: str | None) -> str:
         return ""
 
 
-def default_ap_ssid(managed_interface: str | None) -> str:
+def normalize_mac(mac: str) -> str:
+    return "".join(part for part in mac.upper() if part in "0123456789ABCDEF")
+
+
+def device_identity(managed_interface: str | None) -> dict[str, object]:
     mac = read_mac(managed_interface).replace(":", "").upper()
-    suffix = mac[-4:] if len(mac) >= 4 else secrets.token_hex(2).upper()
-    return f"DraftHub-{suffix}"
+    normalized = normalize_mac(mac)
+    suffix = normalized[-4:] if len(normalized) >= 4 else secrets.token_hex(2).upper()
+    subnet_index = 20 + (int(suffix[-2:], 16) % 180)
+    return {
+        "device_id": suffix,
+        "device_name": f"DraftHub-{suffix}",
+        "ap_ssid": f"DraftHub-{suffix}",
+        "ap_address": f"10.77.{subnet_index}.1",
+        "ap_range": f"10.77.{subnet_index}.20,10.77.{subnet_index}.120,12h",
+        "ap_subnet": f"10.77.{subnet_index}.0/24",
+    }
 
 
-def get_ap_config(managed_interface: str | None) -> dict[str, str]:
+def get_device_config(managed_interface: str | None) -> dict[str, str]:
     config = read_config()
+    defaults = device_identity(managed_interface)
     changed = False
+    for key, value in defaults.items():
+        if not config.get(key):
+            config[key] = value
+            changed = True
     if not config.get("ap_ssid"):
-        config["ap_ssid"] = default_ap_ssid(managed_interface)
+        config["ap_ssid"] = defaults["ap_ssid"]
         changed = True
     if not config.get("ap_password"):
         config["ap_password"] = secrets.token_urlsafe(12)[:16]
         changed = True
     if changed:
         write_config(config)
-    return {"ssid": str(config["ap_ssid"]), "password": str(config["ap_password"])}
+    return {
+        "device_id": str(config["device_id"]),
+        "device_name": str(config["device_name"]),
+        "ssid": str(config["ap_ssid"]),
+        "password": str(config["ap_password"]),
+        "ap_address": str(config.get("ap_address", DEFAULT_AP_ADDRESS)),
+        "ap_range": str(config.get("ap_range", DEFAULT_AP_RANGE)),
+        "ap_subnet": str(config.get("ap_subnet", "10.77.50.0/24")),
+    }
 
 
 def wifi_capability() -> dict[str, object]:
@@ -142,8 +167,9 @@ def ensure_ap_interface(phy: str) -> None:
     iw("phy", f"phy{phy}", "interface", "add", AP_INTERFACE, "type", "__ap")
 
 
-def ensure_dnsmasq_config() -> None:
+def ensure_dnsmasq_config(ap_config: dict[str, str]) -> None:
     CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ap_address = ap_config["ap_address"]
     DNSMASQ_CONFIG_PATH.write_text(
         "\n".join(
             [
@@ -151,10 +177,10 @@ def ensure_dnsmasq_config() -> None:
                 "bind-interfaces",
                 "domain-needed",
                 "bogus-priv",
-                f"dhcp-range={AP_RANGE}",
-                f"dhcp-option=3,{AP_ADDRESS}",
-                f"dhcp-option=6,{AP_ADDRESS}",
-                f"address=/#/{AP_ADDRESS}",
+                f"dhcp-range={ap_config['ap_range']}",
+                f"dhcp-option=3,{ap_address}",
+                f"dhcp-option=6,{ap_address}",
+                f"address=/#/{ap_address}",
                 "",
             ]
         ),
@@ -176,8 +202,8 @@ def ensure_ap() -> None:
     if not capability.get("supports_concurrent_ap_sta"):
         raise SystemExit("Wi-Fi driver does not report concurrent AP + STA support")
     ensure_ap_interface(phy)
-    ap_config = get_ap_config(str(managed.get("name")))
-    ensure_dnsmasq_config()
+    ap_config = get_device_config(str(managed.get("name")))
+    ensure_dnsmasq_config(ap_config)
     if nmcli("-t", "-f", "NAME", "con", "show", AP_CONNECTION, check=False).returncode:
         nmcli("con", "add", "type", "wifi", "ifname", AP_INTERFACE, "con-name", AP_CONNECTION, "ssid", ap_config["ssid"])
     nmcli(
@@ -199,7 +225,7 @@ def ensure_ap() -> None:
         "ipv4.method",
         "manual",
         "ipv4.addresses",
-        AP_CIDR,
+        f"{ap_config['ap_address']}/24",
         "ipv4.never-default",
         "yes",
         "ipv4.route-metric",
@@ -208,7 +234,17 @@ def ensure_ap() -> None:
         "disabled",
     )
     nmcli("con", "up", AP_CONNECTION, check=False)
-    output_json({"ok": True, "ap_ssid": ap_config["ssid"], "ap_interface": AP_INTERFACE, "ap_address": AP_ADDRESS})
+    output_json(
+        {
+            "ok": True,
+            "device_id": ap_config["device_id"],
+            "device_name": ap_config["device_name"],
+            "ap_ssid": ap_config["ssid"],
+            "ap_interface": AP_INTERFACE,
+            "ap_address": ap_config["ap_address"],
+            "ap_subnet": ap_config["ap_subnet"],
+        }
+    )
 
 
 def active_connections() -> list[dict[str, str]]:
@@ -228,23 +264,44 @@ def internet_ok() -> bool:
         return False
 
 
+def local_addresses() -> list[dict[str, str]]:
+    result = run(["ip", "-j", "-4", "addr", "show"], check=False)
+    try:
+        devices = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    addresses: list[dict[str, str]] = []
+    for device in devices:
+        ifname = str(device.get("ifname", ""))
+        for info in device.get("addr_info", []):
+            address = str(info.get("local", ""))
+            if address and not address.startswith("127."):
+                addresses.append({"interface": ifname, "address": address})
+    return addresses
+
+
 def status() -> None:
     device_info = parse_iw_dev() if command_exists("iw") else {"interfaces": [], "managed": None, "ap": None}
     managed = device_info.get("managed")
     managed_name = str(managed.get("name")) if isinstance(managed, dict) else None
-    ap_config = get_ap_config(managed_name) if os.geteuid() == 0 else read_config()
+    ap_config = get_device_config(managed_name) if os.geteuid() == 0 else read_config()
     route = run(["ip", "route", "show", "default"], check=False).stdout.strip()
     output_json(
         {
+            "device_id": ap_config.get("device_id"),
+            "device_name": ap_config.get("device_name"),
+            "hostname": socket.gethostname(),
             "network_manager": command_exists("nmcli"),
             "dnsmasq": Path("/usr/sbin/dnsmasq").exists() or command_exists("dnsmasq"),
             "capability": wifi_capability(),
             "managed_interface": managed_name,
             "ap_interface": AP_INTERFACE if Path(f"/sys/class/net/{AP_INTERFACE}").exists() else None,
             "ap_ssid": ap_config.get("ssid") or ap_config.get("ap_ssid"),
-            "ap_address": AP_ADDRESS,
+            "ap_address": ap_config.get("ap_address", DEFAULT_AP_ADDRESS),
+            "ap_subnet": ap_config.get("ap_subnet", "10.77.50.0/24"),
             "venue_ssid": managed.get("ssid") if isinstance(managed, dict) else None,
             "active_connections": active_connections() if command_exists("nmcli") else [],
+            "local_addresses": local_addresses(),
             "default_route": route,
             "internet": internet_ok(),
         }
