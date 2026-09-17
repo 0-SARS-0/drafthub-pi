@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.request
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
@@ -129,6 +130,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       margin: 8px 0;
     }
     .field-row input,
+    .field-row textarea,
     .field-row select {
       min-width: 0;
       flex: 1;
@@ -139,6 +141,10 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       color: #eef6fb;
       font: inherit;
       padding: 8px;
+    }
+    .field-row textarea {
+      min-height: 72px;
+      resize: vertical;
     }
     input[type="number"] {
       width: 76px;
@@ -230,6 +236,29 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     </section>
 
     <section>
+      <h2>Shared Wall</h2>
+      <div class="field-row">
+        <input id="wall-index" type="number" min="1" max="32" title="This device number" placeholder="Device #">
+        <input id="wall-count" type="number" min="1" max="32" title="Total devices" placeholder="Total">
+      </div>
+      <div class="field-row">
+        <textarea id="wall-peers" placeholder="Peer manager URLs, one per line, for example http://192.168.0.64:8080"></textarea>
+      </div>
+      <div class="field-row">
+        <input id="wall-message" type="text" placeholder="Shared scrolling message">
+      </div>
+      <div class="field-row">
+        <input id="wall-speed" type="number" min="20" max="800" value="120" title="Pixels per second">
+        <select id="wall-direction">
+          <option value="ltr">Device 1 to last</option>
+          <option value="rtl">Last device to 1</option>
+        </select>
+        <button id="wall-send">Send</button>
+      </div>
+      <div class="status" id="wall-status"></div>
+    </section>
+
+    <section>
       <h2>Upload Media</h2>
       <input id="file" type="file" accept=".vid,.rgb565,.mp4,.png,.jpg,.jpeg,.zlib">
       <button id="upload">Upload</button>
@@ -270,6 +299,14 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const wifiPassword = document.querySelector("#wifi-password");
     const wifiScanButton = document.querySelector("#wifi-scan");
     const wifiConnectButton = document.querySelector("#wifi-connect");
+    const wallIndex = document.querySelector("#wall-index");
+    const wallCount = document.querySelector("#wall-count");
+    const wallPeers = document.querySelector("#wall-peers");
+    const wallMessage = document.querySelector("#wall-message");
+    const wallSpeed = document.querySelector("#wall-speed");
+    const wallDirection = document.querySelector("#wall-direction");
+    const wallSendButton = document.querySelector("#wall-send");
+    const wallStatus = document.querySelector("#wall-status");
     const savePlaylistButton = document.querySelector("#save-playlist");
     const playPlaylistButton = document.querySelector("#play-playlist");
     const stopPlaylistButton = document.querySelector("#stop-playlist");
@@ -335,6 +372,32 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       } finally {
         wifiScanButton.disabled = false;
       }
+    }
+
+    async function refreshWallConfig() {
+      try {
+        const response = await request("/wall-config");
+        const payload = await response.json();
+        wallIndex.value = Number(payload.device_index || 0) + 1;
+        wallCount.value = payload.device_count || 1;
+        wallPeers.value = (payload.peers || []).join("\\n");
+      } catch (error) {
+        wallStatus.textContent = `Wall config error: ${error.message}`;
+      }
+    }
+
+    async function saveWallConfig() {
+      const payload = {
+        device_index: Math.max(0, (Number(wallIndex.value) || 1) - 1),
+        device_count: Math.max(1, Number(wallCount.value) || 1),
+        peers: wallPeers.value.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean),
+      };
+      await request("/wall-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return payload;
     }
 
     function uploadFile(file) {
@@ -595,6 +658,36 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       }
     });
 
+    wallSendButton.addEventListener("click", async () => {
+      const text = wallMessage.value.trim();
+      if (!text) {
+        wallStatus.textContent = "Enter a message first.";
+        return;
+      }
+      wallSendButton.disabled = true;
+      wallStatus.textContent = "Sending shared message...";
+      try {
+        const config = await saveWallConfig();
+        const response = await request("/wall-message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            device_count: config.device_count,
+            speed: Math.max(20, Number(wallSpeed.value) || 120),
+            direction: wallDirection.value,
+            broadcast: true,
+          }),
+        });
+        const payload = await response.json();
+        wallStatus.textContent = `Message sent to ${payload.sent} device(s).`;
+      } catch (error) {
+        wallStatus.textContent = `Wall message error: ${error.message}`;
+      } finally {
+        wallSendButton.disabled = false;
+      }
+    });
+
     savePlaylistButton.addEventListener("click", async () => {
       clearTimeout(playlistSaveTimer);
       playlistStatus.textContent = "Saving...";
@@ -631,6 +724,7 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     refreshMedia();
     refreshPlaylist();
     refreshWifiStatus();
+    refreshWallConfig();
   </script>
 </body>
 </html>
@@ -664,10 +758,22 @@ class PlaylistItem:
 
 
 @dataclass(frozen=True)
+class WallMessage:
+    text: str
+    device_index: int
+    device_count: int
+    speed: float
+    direction: str
+    start_at: float
+    duration: float | None = None
+
+
+@dataclass(frozen=True)
 class PlaybackRequest:
     kind: str
     path: Path | None = None
     playlist: tuple[PlaylistItem, ...] = ()
+    wall_message: WallMessage | None = None
 
 
 NAV_ITEMS = (
@@ -727,6 +833,8 @@ class DraftHubApp:
                 try:
                     if playback_request.kind == "playlist":
                         self.play_playlist(playback_request.playlist)
+                    elif playback_request.kind == "wall-message" and playback_request.wall_message is not None:
+                        self.play_wall_message(playback_request.wall_message)
                     elif playback_request.path is not None:
                         self.play_media(playback_request.path)
                     else:
@@ -776,6 +884,12 @@ class DraftHubApp:
                     return
                 media_path = self.upload_server.media_dir / item.name
                 self.play_media(media_path, self.playlist_item_duration(media_path, item.duration))
+
+    def play_wall_message(self, message: WallMessage) -> None:
+        WallMessagePlayer(message).run(
+            self.framebuffer,
+            self.upload_server.playback_stop,
+        )
 
     def playlist_item_duration(self, media_path: Path, duration: float) -> float | None:
         suffix = media_path.suffix.lower()
@@ -1205,6 +1319,7 @@ class UploadServer:
         self.media_dir = media_dir
         self.state_dir = state_dir
         self.playlist_path = state_dir / "playlist.json"
+        self.wall_config_path = state_dir / "wall.json"
         self.port = port
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
@@ -1252,6 +1367,9 @@ class UploadServer:
                     return
                 if parsed.path == "/playlist":
                     self.send_json({"items": upload_server.load_playlist_json()})
+                    return
+                if parsed.path == "/wall-config":
+                    self.send_json(upload_server.load_wall_config())
                     return
                 if parsed.path == "/wifi-status":
                     self.handle_network_command("status")
@@ -1303,6 +1421,12 @@ class UploadServer:
                 if parsed.path == "/playlist":
                     self.handle_playlist_save()
                     return
+                if parsed.path == "/wall-config":
+                    self.handle_wall_config_save()
+                    return
+                if parsed.path == "/wall-message":
+                    self.handle_wall_message()
+                    return
                 if parsed.path == "/play-playlist":
                     try:
                         upload_server.request_playlist_playback()
@@ -1346,6 +1470,30 @@ class UploadServer:
                     return
                 self.send_text(200, "Playlist saved")
 
+            def read_json_body(self, empty_message: str) -> object:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0:
+                    raise ValueError(empty_message)
+                return json.loads(self.rfile.read(content_length).decode("utf-8"))
+
+            def handle_wall_config_save(self) -> None:
+                try:
+                    payload = self.read_json_body("Wall configuration body is empty")
+                    upload_server.save_wall_config(payload)
+                except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_text(200, "Wall configuration saved")
+
+            def handle_wall_message(self) -> None:
+                try:
+                    payload = self.read_json_body("Wall message body is empty")
+                    result = upload_server.request_wall_message(payload)
+                except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_json(result)
+
             def handle_delete(self, query_string: str) -> None:
                 query = urllib.parse.parse_qs(query_string)
                 media_name = query.get("name", [""])[0]
@@ -1369,10 +1517,7 @@ class UploadServer:
 
             def handle_wifi_configure(self) -> None:
                 try:
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                    if content_length <= 0:
-                        raise ValueError("Wi-Fi configuration body is empty")
-                    payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                    payload = self.read_json_body("Wi-Fi configuration body is empty")
                     self.handle_network_command("configure-venue", payload)
                 except (json.JSONDecodeError, OSError, ValueError) as exc:
                     self.send_error(400, str(exc))
@@ -1512,6 +1657,62 @@ class UploadServer:
             self.playback_stop.set()
             self.playback_request = PlaybackRequest("playlist", playlist=playlist)
 
+    def request_wall_message(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ValueError("Wall message payload must be an object")
+        wall_config = self.load_wall_config()
+        device_count = self.parse_positive_int(payload.get("device_count", wall_config["device_count"]), "device_count", 32)
+        device_index = self.parse_device_index(payload.get("device_index", wall_config["device_index"]), device_count)
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            raise ValueError("Wall message text is required")
+        speed = float(payload.get("speed", 120))
+        if speed < 20 or speed > 800:
+            raise ValueError("Wall message speed must be between 20 and 800 pixels per second")
+        direction = str(payload.get("direction", "ltr")).lower()
+        if direction not in ("ltr", "rtl"):
+            raise ValueError("Wall message direction must be ltr or rtl")
+        start_at = float(payload.get("start_at", time.time() + 1.5))
+        duration_value = payload.get("duration")
+        duration = float(duration_value) if duration_value not in (None, "", 0) else None
+        message = WallMessage(text, device_index, device_count, speed, direction, start_at, duration)
+        with self.playback_lock:
+            self.playback_stop.set()
+            self.playback_request = PlaybackRequest("wall-message", wall_message=message)
+
+        sent = 1
+        errors: list[str] = []
+        if payload.get("broadcast"):
+            peer_payload = {
+                "text": text,
+                "device_count": device_count,
+                "speed": speed,
+                "direction": direction,
+                "start_at": start_at,
+            }
+            for peer in wall_config["peers"]:
+                try:
+                    self.post_peer_wall_message(str(peer), peer_payload)
+                    sent += 1
+                except OSError as exc:
+                    errors.append(f"{peer}: {exc}")
+        return {"ok": True, "sent": sent, "errors": errors}
+
+    def post_peer_wall_message(self, peer_url: str, payload: object) -> None:
+        base_url = peer_url.rstrip("/")
+        if not base_url.startswith(("http://", "https://")):
+            base_url = f"http://{base_url}"
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base_url}/wall-message",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            if response.status >= 400:
+                raise OSError(f"HTTP {response.status}")
+
     def take_playback_request(self) -> PlaybackRequest | None:
         with self.playback_lock:
             playback_path = self.playback_request
@@ -1540,6 +1741,62 @@ class UploadServer:
         part_path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
         os.replace(part_path, self.playlist_path)
         LOGGER.info("Saved playlist path=%s items=%s", self.playlist_path, len(items))
+
+    def load_wall_config(self) -> dict[str, object]:
+        if not self.wall_config_path.exists():
+            return {"device_index": 0, "device_count": 1, "peers": []}
+        try:
+            payload = json.loads(self.wall_config_path.read_text(encoding="utf-8"))
+            return self.parse_wall_config_payload(payload)
+        except (OSError, ValueError, json.JSONDecodeError):
+            LOGGER.exception("Unable to load wall config %s", self.wall_config_path)
+            return {"device_index": 0, "device_count": 1, "peers": []}
+
+    def save_wall_config(self, payload: object) -> None:
+        config = self.parse_wall_config_payload(payload)
+        part_path = self.wall_config_path.with_suffix(".json.part")
+        part_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(part_path, self.wall_config_path)
+        LOGGER.info("Saved wall config path=%s peers=%s", self.wall_config_path, len(config["peers"]))
+
+    def parse_wall_config_payload(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ValueError("Wall configuration payload must be an object")
+        device_count = self.parse_positive_int(payload.get("device_count", 1), "device_count", 32)
+        device_index = self.parse_device_index(payload.get("device_index", 0), device_count)
+        raw_peers = payload.get("peers", [])
+        if not isinstance(raw_peers, list):
+            raise ValueError("Wall peers must be a list")
+        peers: list[str] = []
+        for raw_peer in raw_peers:
+            peer = str(raw_peer).strip().rstrip("/")
+            if not peer:
+                continue
+            if not re.fullmatch(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+|[A-Za-z0-9._-]+(?::\d+)?", peer):
+                raise ValueError(f"Bad wall peer URL: {peer}")
+            if peer not in peers:
+                peers.append(peer)
+        return {"device_index": device_index, "device_count": device_count, "peers": peers}
+
+    @staticmethod
+    def parse_positive_int(value: object, field_name: str, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a number") from exc
+        if parsed < 1 or parsed > maximum:
+            raise ValueError(f"{field_name} must be between 1 and {maximum}")
+        return parsed
+
+    @staticmethod
+    def parse_device_index(value: object, device_count: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("device_index must be a number") from exc
+        if parsed < 0 or parsed >= device_count:
+            raise ValueError("device_index must be within the wall device count")
+        return parsed
 
     def parse_playlist_payload(self, payload: object) -> list[PlaylistItem]:
         if not isinstance(payload, dict):
@@ -1620,6 +1877,54 @@ class ImagePlayer:
         image = pygame.image.load(self.path)
         presenter.present_cover(image, presenter.video_viewport)
         wait_for_duration(self.duration, stop_event)
+
+
+class WallMessagePlayer:
+    def __init__(self, message: WallMessage) -> None:
+        self.message = message
+
+    def run(self, presenter: FramebufferPresenter, stop_event: threading.Event | None = None) -> None:
+        viewport = presenter.video_viewport
+        font_size = max(48, viewport.height // 6)
+        font = pygame.font.Font(None, font_size)
+        text_surface = font.render(self.message.text, True, COLORS["text"])
+        text_width, text_height = text_surface.get_size()
+        virtual_width = viewport.width * self.message.device_count
+        travel = virtual_width + text_width
+        duration = self.message.duration or max(2, travel / self.message.speed)
+        device_offset = viewport.width * self.message.device_index
+        canvas = pygame.Surface((viewport.width, viewport.height))
+        LOGGER.info(
+            "Playing wall message index=%s count=%s direction=%s duration=%.2f text_len=%s",
+            self.message.device_index,
+            self.message.device_count,
+            self.message.direction,
+            duration,
+            len(self.message.text),
+        )
+        if self.message.start_at > time.time() and stop_event is not None:
+            stop_event.wait(max(0, self.message.start_at - time.time()))
+        start = self.message.start_at
+        while stop_event is None or not stop_event.is_set():
+            elapsed = time.time() - start
+            if elapsed >= duration:
+                return
+            if self.message.direction == "rtl":
+                global_x = virtual_width - (elapsed * self.message.speed)
+            else:
+                global_x = -text_width + (elapsed * self.message.speed)
+            local_x = int(global_x - device_offset)
+            canvas.fill(COLORS["background"])
+            center_y = (viewport.height - text_height) // 2
+            pygame.draw.rect(canvas, COLORS["panel"], pygame.Rect(0, 0, viewport.width, viewport.height))
+            pygame.draw.line(canvas, COLORS["accent"], (0, center_y - 24), (viewport.width, center_y - 24), 2)
+            pygame.draw.line(canvas, COLORS["accent"], (0, center_y + text_height + 24), (viewport.width, center_y + text_height + 24), 2)
+            canvas.blit(text_surface, (local_x, center_y))
+            presenter.present(canvas, viewport)
+            if stop_event is None:
+                time.sleep(1 / 30)
+            else:
+                stop_event.wait(1 / 30)
 
 
 class RawVidPlayer:

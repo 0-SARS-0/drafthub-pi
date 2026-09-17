@@ -218,6 +218,29 @@ List uploaded files:
 http://<device-ip>:8080/media-index
 ```
 
+## Shared Wall Messages
+
+Multiple DraftHub devices on the same venue network can show a synchronized
+scrolling message across the group. Each device stores:
+
+- its position in the wall, shown in the manager as device `1`, `2`, etc.
+- the total number of devices in the wall
+- peer manager URLs to broadcast commands to
+
+For a two-device wall:
+
+1. Open device 1 manager and set `Device #` to `1`, `Total` to `2`.
+2. Open device 2 manager and set `Device #` to `2`, `Total` to `2`.
+3. On the device you will send from, add the other device URL in `Peer manager
+   URLs`, for example `http://192.168.0.64:8080`.
+4. Enter a shared message and press `Send`.
+
+The sender posts a shared start time to every peer. Each device renders only
+its slice of the virtual wall, so a left-to-right message appears to move from
+device 1 to device 2. This first shared-wall implementation is for text
+messages; synchronized multi-device video can build on the same peer/config
+model once the media files are present on every device.
+
 ## Dual Wi-Fi Test Procedure
 
 After enabling networking, verify:
