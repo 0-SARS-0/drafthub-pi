@@ -269,6 +269,15 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     </section>
 
     <section>
+      <h2>Startup Screen</h2>
+      <div class="field-row">
+        <select id="startup-media"></select>
+        <button id="save-startup">Save</button>
+      </div>
+      <div class="status" id="startup-status"></div>
+    </section>
+
+    <section>
       <h2>Playlist</h2>
       <div id="playlist"></div>
       <div class="playlist-controls">
@@ -298,6 +307,9 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
     const uploadProgress = document.querySelector("#upload-progress");
     const uploadButton = document.querySelector("#upload");
     const uploadAllButton = document.querySelector("#upload-all");
+    const startupMedia = document.querySelector("#startup-media");
+    const startupStatus = document.querySelector("#startup-status");
+    const saveStartupButton = document.querySelector("#save-startup");
     const wifiSummary = document.querySelector("#wifi-summary");
     const wifiStatus = document.querySelector("#wifi-status");
     const wifiSsid = document.querySelector("#wifi-ssid");
@@ -614,8 +626,31 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
           media.append(row);
         }
         mediaStatus.textContent = "";
+        await refreshStartupConfig();
       } catch (error) {
         mediaStatus.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    async function refreshStartupConfig() {
+      try {
+        const response = await request("/startup-config");
+        const payload = await response.json();
+        const current = payload.name || "";
+        startupMedia.replaceChildren();
+        const disabled = document.createElement("option");
+        disabled.value = "";
+        disabled.textContent = "No startup video";
+        startupMedia.append(disabled);
+        for (const file of mediaFiles.filter((item) => isVideo(item.name))) {
+          const option = document.createElement("option");
+          option.value = file.name;
+          option.textContent = file.name;
+          startupMedia.append(option);
+        }
+        startupMedia.value = current;
+      } catch (error) {
+        startupStatus.textContent = `Startup config error: ${error.message}`;
       }
     }
 
@@ -667,6 +702,20 @@ MANAGER_PAGE_TEMPLATE = """<!doctype html>
       } finally {
         uploadButton.disabled = false;
         uploadAllButton.disabled = false;
+      }
+    });
+
+    saveStartupButton.addEventListener("click", async () => {
+      startupStatus.textContent = "Saving startup screen...";
+      try {
+        await request("/startup-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: startupMedia.value }),
+        });
+        startupStatus.textContent = startupMedia.value ? `Startup video set to ${startupMedia.value}.` : "Startup video disabled.";
+      } catch (error) {
+        startupStatus.textContent = `Error: ${error.message}`;
       }
     });
 
@@ -873,8 +922,10 @@ class DraftHubApp:
         self.ip_checked_at = 0.0
         self.upload_server = UploadServer(DEFAULT_MEDIA_DIR, DEFAULT_STATE_DIR, DEFAULT_UPLOAD_PORT)
         self.upload_server.start()
+        self.startup_played = False
 
     def run(self) -> None:
+        self.play_startup_media()
         while self.running:
             playback_request = self.upload_server.take_playback_request()
             if playback_request is not None:
@@ -922,6 +973,34 @@ class DraftHubApp:
                 self.upload_server.playback_stop,
                 duration,
             )
+
+    def play_startup_media(self) -> None:
+        if self.startup_played or self.framebuffer is None:
+            return
+        self.startup_played = True
+        startup_path = self.upload_server.startup_media_path()
+        if startup_path is None:
+            return
+        try:
+            LOGGER.info("Playing startup media path=%s", startup_path)
+            self.upload_server.playback_stop.clear()
+            self.play_media(startup_path, self.startup_media_duration(startup_path))
+        except Exception:
+            LOGGER.exception("Startup media failed path=%s", startup_path)
+        finally:
+            self.upload_server.playback_stop.clear()
+
+    def startup_media_duration(self, media_path: Path) -> float | None:
+        suffix = media_path.suffix.lower()
+        if suffix in (".vid", ".rgb565"):
+            try:
+                _, _, _, frame_count = RawVidPlayer.inspect(media_path, *self.video_size)
+                return max(1 / 30, frame_count / 30)
+            except (OSError, ValueError):
+                return 10
+        if suffix == ".mp4":
+            return FfmpegMp4Player.probe_duration(media_path) or 10
+        return 3
 
     def play_playlist(self, playlist: tuple[PlaylistItem, ...]) -> None:
         if not playlist:
@@ -1359,6 +1438,7 @@ class UploadServer:
         self.state_dir = state_dir
         self.playlist_path = state_dir / "playlist.json"
         self.wall_config_path = state_dir / "wall.json"
+        self.startup_config_path = state_dir / "startup.json"
         self.port = port
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
@@ -1409,6 +1489,9 @@ class UploadServer:
                     return
                 if parsed.path == "/wall-config":
                     self.send_json(upload_server.load_wall_config())
+                    return
+                if parsed.path == "/startup-config":
+                    self.send_json(upload_server.load_startup_config())
                     return
                 if parsed.path == "/wifi-status":
                     self.handle_network_command("status")
@@ -1462,6 +1545,9 @@ class UploadServer:
                     return
                 if parsed.path == "/wall-config":
                     self.handle_wall_config_save()
+                    return
+                if parsed.path == "/startup-config":
+                    self.handle_startup_config_save()
                     return
                 if parsed.path == "/wall-message":
                     self.handle_wall_message()
@@ -1532,6 +1618,15 @@ class UploadServer:
                     self.send_error(400, str(exc))
                     return
                 self.send_text(200, "Wall configuration saved")
+
+            def handle_startup_config_save(self) -> None:
+                try:
+                    payload = self.read_json_body("Startup configuration body is empty")
+                    upload_server.save_startup_config(payload)
+                except (json.JSONDecodeError, OSError, ValueError) as exc:
+                    self.send_error(400, str(exc))
+                    return
+                self.send_text(200, "Startup configuration saved")
 
             def handle_wall_message(self) -> None:
                 try:
@@ -1667,6 +1762,7 @@ class UploadServer:
             self.playback_stop.set()
         target_path.unlink()
         self.remove_from_playlist(target_name)
+        self.remove_startup_media(target_name)
         LOGGER.info("Deleted media path=%s", target_path)
 
     def network_command(self, command: str, payload: object | None = None) -> object:
@@ -1714,6 +1810,12 @@ class UploadServer:
             return
         payload = {"items": [{"name": item.name, "duration": item.duration} for item in kept]}
         self.save_playlist_json(payload)
+
+    def remove_startup_media(self, target_name: str) -> None:
+        config = self.load_startup_config()
+        if config.get("name") != target_name:
+            return
+        self.save_startup_config({"name": ""})
 
     def request_playback(self, target_name: str) -> None:
         target_path = self.media_dir / target_name
@@ -1936,6 +2038,50 @@ class UploadServer:
         part_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         os.replace(part_path, self.wall_config_path)
         LOGGER.info("Saved wall config path=%s peers=%s", self.wall_config_path, len(config["peers"]))
+
+    def load_startup_config(self) -> dict[str, str]:
+        if not self.startup_config_path.exists():
+            return {"name": ""}
+        try:
+            payload = json.loads(self.startup_config_path.read_text(encoding="utf-8"))
+            return self.parse_startup_config_payload(payload)
+        except (OSError, ValueError, json.JSONDecodeError):
+            LOGGER.exception("Unable to load startup config %s", self.startup_config_path)
+            return {"name": ""}
+
+    def save_startup_config(self, payload: object) -> None:
+        config = self.parse_startup_config_payload(payload)
+        part_path = self.startup_config_path.with_suffix(".json.part")
+        part_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(part_path, self.startup_config_path)
+        LOGGER.info("Saved startup config path=%s media=%s", self.startup_config_path, config["name"] or "<disabled>")
+
+    def parse_startup_config_payload(self, payload: object) -> dict[str, str]:
+        if not isinstance(payload, dict):
+            raise ValueError("Startup configuration payload must be an object")
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            return {"name": ""}
+        target_name, compressed = self.validate_name(name)
+        if compressed or not target_name.lower().endswith((".vid", ".rgb565", ".mp4")):
+            raise ValueError("Startup media must be an uploaded .vid, .rgb565, or .mp4 video")
+        if not (self.media_dir / target_name).is_file():
+            raise ValueError(f"Startup media not found: {target_name}")
+        return {"name": target_name}
+
+    def startup_media_path(self) -> Path | None:
+        configured = self.load_startup_config().get("name", "")
+        if configured:
+            path = self.media_dir / configured
+            if path.is_file():
+                return path
+            LOGGER.warning("Configured startup media is missing: %s", configured)
+            return None
+        for name in ("startup.vid", "startup.rgb565", "startup.mp4", "intro.vid", "intro.rgb565", "intro.mp4"):
+            path = self.media_dir / name
+            if path.is_file():
+                return path
+        return None
 
     def parse_wall_config_payload(self, payload: object) -> dict[str, object]:
         if not isinstance(payload, dict):

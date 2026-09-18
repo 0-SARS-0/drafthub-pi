@@ -243,6 +243,28 @@ List uploaded files:
 http://<device-ip>:8080/media-index
 ```
 
+## Startup Screen
+
+The manager page has a `Startup Screen` section. Upload an `.mp4`, `.vid`, or
+`.rgb565` video, select it there, and save. On the next DraftHub service start
+or device boot, the player shows that video once before returning to the normal
+device status screen.
+
+If no startup video is configured, DraftHub will also auto-detect these uploaded
+filenames:
+
+```text
+startup.vid
+startup.rgb565
+startup.mp4
+intro.vid
+intro.rgb565
+intro.mp4
+```
+
+MP4 startup videos use `ffprobe` duration when available. Raw `.vid`/`.rgb565`
+startup videos use the detected frame count and 30 FPS timing.
+
 ## Shared Wall Messages
 
 Multiple DraftHub devices on the same venue network can show a synchronized
