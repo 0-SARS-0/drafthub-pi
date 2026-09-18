@@ -6,6 +6,10 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/drafthub-pi
+# Disabled by default because the Radxa Zero 3W onboard aic8800 driver can be
+# unstable in concurrent AP + STA mode on current Armbian images.
+# Set to 1 only for bench testing, or use a dedicated USB Wi-Fi adapter for AP.
+# Environment=DRAFTHUB_ALLOW_ONBOARD_AP=1
 ExecStart=/usr/bin/python3 /opt/drafthub-pi/scripts/drafthub_network.py ensure-ap
 RemainAfterExit=yes
 

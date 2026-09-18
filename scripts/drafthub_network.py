@@ -17,6 +17,7 @@ DNSMASQ_CONFIG_PATH = CONFIG_DIR / "dnsmasq-ap.conf"
 AP_CONNECTION = "DraftHub Management AP"
 VENUE_CONNECTION = "DraftHub Venue Wi-Fi"
 AP_INTERFACE = "dhap0"
+ALLOW_ONBOARD_AP_ENV = "DRAFTHUB_ALLOW_ONBOARD_AP"
 DEFAULT_AP_ADDRESS = "10.77.50.1"
 DEFAULT_AP_RANGE = "10.77.50.20,10.77.50.120,12h"
 
@@ -191,6 +192,19 @@ def ensure_dnsmasq_config(ap_config: dict[str, str]) -> None:
 
 def ensure_ap() -> None:
     ensure_root()
+    if os.environ.get(ALLOW_ONBOARD_AP_ENV) != "1":
+        output_json(
+            {
+                "ok": False,
+                "reason": (
+                    "Onboard AP mode is disabled because the Radxa Zero 3W aic8800 "
+                    "driver has proven unreliable for concurrent AP + STA on this image. "
+                    "Use a dedicated USB Wi-Fi adapter for the DraftHub AP, or set "
+                    f"{ALLOW_ONBOARD_AP_ENV}=1 for experimental testing."
+                ),
+            }
+        )
+        return
     if not command_exists("nmcli"):
         raise SystemExit("NetworkManager/nmcli is not installed")
     device_info = parse_iw_dev()
@@ -294,6 +308,7 @@ def status() -> None:
             "network_manager": command_exists("nmcli"),
             "dnsmasq": Path("/usr/sbin/dnsmasq").exists() or command_exists("dnsmasq"),
             "capability": wifi_capability(),
+            "onboard_ap_enabled": os.environ.get(ALLOW_ONBOARD_AP_ENV) == "1",
             "managed_interface": managed_name,
             "ap_interface": AP_INTERFACE if Path(f"/sys/class/net/{AP_INTERFACE}").exists() else None,
             "ap_ssid": ap_config.get("ssid") or ap_config.get("ap_ssid"),

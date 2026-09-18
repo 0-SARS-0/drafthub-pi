@@ -40,11 +40,25 @@ The installer creates a dedicated `drafthub` service user, adds it to any
 available `video`, `render`, and `input` groups, installs Python/pygame/ffmpeg,
 creates `/var/lib/drafthub`, and starts `drafthub-pi.service`.
 
-### Dual Wi-Fi Management Network
+### Wi-Fi Management Network
 
-DraftHub includes an optional NetworkManager-based Wi-Fi setup for the Radxa
-Zero 3W. It keeps the player connected to venue Wi-Fi as a normal client while
-also providing a local management AP:
+DraftHub includes a local network helper for Wi-Fi status, venue Wi-Fi
+provisioning, and management AP experiments. The safe default is to keep the
+Radxa connected to the venue Wi-Fi and manage every player through the shared
+hub on the venue LAN.
+
+The Radxa Zero 3W onboard `aic8800` Wi-Fi driver reports AP + STA support, but
+in practice it can be unstable on this Armbian image. Do not rely on the onboard
+radio for a production always-on DraftHub AP. If an always-available management
+SSID is required, use a dedicated USB Wi-Fi adapter for the AP side.
+
+Recommended topology:
+
+```text
+Venue Wi-Fi / Internet -> Radxa STA -> DraftHub manager at http://<venue-ip>:8080
+```
+
+Experimental AP topology:
 
 ```text
 Venue Wi-Fi / Internet -> Radxa STA
@@ -58,7 +72,17 @@ cd /opt/drafthub-pi
 sudo ./scripts/install.sh --enable-networking
 ```
 
-This installs `network-manager`, `dnsmasq-base`, and `iw`, then enables:
+This installs the network helper and its sudo rule. It does not switch the live
+network stack or start AP services.
+
+Only for bench testing the onboard AP mode:
+
+```bash
+sudo ./scripts/install.sh --enable-onboard-ap
+```
+
+This installs `network-manager`, `dnsmasq-base`, and `iw`, migrates Wi-Fi to
+NetworkManager, then enables:
 
 - `drafthub-network.service` to create the virtual AP interface and
   NetworkManager AP profile
@@ -76,9 +100,10 @@ name, and generated WPA password are stored root-only in:
 /etc/drafthub/network.json
 ```
 
-The installer backs up existing netplan files to `/etc/drafthub/netplan-backup`
-before enabling NetworkManager services. Repeated installer runs are idempotent:
-they update the same DraftHub profiles/services rather than creating duplicates.
+The `--enable-onboard-ap` path backs up existing netplan files to
+`/etc/drafthub/netplan-backup` before enabling NetworkManager services.
+Repeated installer runs are idempotent: they update the same DraftHub
+profiles/services rather than creating duplicates.
 
 The manager page exposes Wi-Fi status, network scanning, and venue Wi-Fi
 credential submission. Passwords are submitted to the local device only and are
@@ -263,31 +288,38 @@ copy of media, and the hub pushes files/playlist commands over HTTP to the
 other DraftHub managers. That keeps playback resilient if the hub disappears
 after content has been synced.
 
-## Dual Wi-Fi Test Procedure
+## Wi-Fi / AP Test Procedure
 
-After enabling networking, verify:
+After installing the network helper, verify:
 
 ```bash
-systemctl status NetworkManager drafthub-network drafthub-ap-dnsmasq --no-pager
 sudo /usr/local/sbin/drafthub-network status
 ip route
 ```
 
+For experimental onboard AP testing, also verify:
+
+```bash
+systemctl status NetworkManager drafthub-network drafthub-ap-dnsmasq --no-pager
+```
+
 Test cases:
 
-- Fresh device with no venue profile: its unique `DraftHub-XXXX` SSID is visible
+- Fresh experimental AP device with no venue profile: its unique `DraftHub-XXXX` SSID is visible
   and `http://<device-ap-address>:8080/manage` loads after joining it. The AP
   address is shown by `sudo /usr/local/sbin/drafthub-network status`.
 - Successful venue provisioning: scan, select SSID, enter password, and confirm
   the manager shows the venue SSID plus Internet online.
 - Incorrect venue password: connection reports failure and the DraftHub AP stays
   available.
-- Venue Wi-Fi unavailable or drops: local cached playback continues and the AP
-  remains available.
+- Venue Wi-Fi unavailable or drops: local cached playback continues.
+- Dedicated AP adapter testing: management AP remains available when venue Wi-Fi
+  drops.
 - Internet unavailable while venue Wi-Fi is connected: manager reports Internet
   offline but the player and AP remain available.
-- Venue password changes: connect to the DraftHub AP, submit the new password,
-  and confirm reconnection without SSH.
+- Venue password changes: use the shared hub on the venue LAN, or connect to the
+  dedicated management AP if fitted, submit the new password, and confirm
+  reconnection without SSH.
 - Reboot: the unique `DraftHub-XXXX` SSID returns, DHCP works, and the venue
   profile reconnects.
 - Simultaneous AP + STA: `iw dev` shows the venue managed interface and `dhap0`
