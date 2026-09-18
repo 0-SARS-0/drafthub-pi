@@ -813,12 +813,6 @@ COLORS = {
 
 
 @dataclass(frozen=True)
-class NavItem:
-    key: str
-    label: str
-
-
-@dataclass(frozen=True)
 class PlaylistItem:
     name: str
     duration: float
@@ -841,14 +835,6 @@ class PlaybackRequest:
     path: Path | None = None
     playlist: tuple[PlaylistItem, ...] = ()
     wall_message: WallMessage | None = None
-
-
-NAV_ITEMS = (
-    NavItem("connection", "Connect"),
-    NavItem("media", "Media"),
-    NavItem("playlist", "Playlist"),
-    NavItem("manage", "Manage"),
-)
 
 
 class DraftHubApp:
@@ -875,7 +861,6 @@ class DraftHubApp:
         self.clock = pygame.time.Clock()
         self.windowed = windowed
         self.running = True
-        self.active_view = "connection"
         self.video_size = parse_size(os.environ.get("DRAFTHUB_VIDEO_SIZE", f"{WIDTH}x{HEIGHT}"))
         self.mp4_fps = parse_positive_int(os.environ.get("DRAFTHUB_MP4_FPS", "6"), "DRAFTHUB_MP4_FPS")
         self.font_small = pygame.font.Font(None, 22)
@@ -886,7 +871,6 @@ class DraftHubApp:
         self.build_label = get_build_label()
         self.ip_address = ""
         self.ip_checked_at = 0.0
-        self.nav_rects: dict[str, pygame.Rect] = {}
         self.upload_server = UploadServer(DEFAULT_MEDIA_DIR, DEFAULT_STATE_DIR, DEFAULT_UPLOAD_PORT)
         self.upload_server.start()
 
@@ -990,29 +974,11 @@ class DraftHubApp:
             elif event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_q):
                 LOGGER.info("Received exit key: %s", pygame.key.name(event.key))
                 self.running = False
-            elif event.type == pygame.MOUSEBUTTONUP:
-                self.handle_tap(self.to_canvas_position(event.pos))
-            elif event.type == pygame.FINGERUP:
-                self.handle_tap((int(event.x * WIDTH), int(event.y * HEIGHT)))
-
-    def handle_tap(self, position: tuple[int, int]) -> None:
-        for key, rect in self.nav_rects.items():
-            if rect.collidepoint(position):
-                self.active_view = key
-                return
 
     def draw(self) -> None:
         self.canvas.fill(COLORS["background"])
         self.draw_header()
-        if self.active_view == "connection":
-            self.draw_connection()
-        elif self.active_view == "media":
-            self.draw_media()
-        elif self.active_view == "playlist":
-            self.draw_playlist()
-        else:
-            self.draw_manage()
-        self.draw_navigation()
+        self.draw_connection()
 
     def draw_header(self) -> None:
         pygame.draw.circle(self.canvas, COLORS["panel_alt"], (WIDTH // 2, 0), 122)
@@ -1036,18 +1002,39 @@ class DraftHubApp:
     def draw_connection(self) -> None:
         self.refresh_network_address()
         manager_url = f"http://{self.ip_address}:8080" if self.ip_address else "Waiting for network"
-        self.draw_section_title("Connection", "Network status")
-        self.draw_panel(pygame.Rect(58, 112, 364, 128), "NETWORK", "Connected", COLORS["success"])
-        self.draw_label_value("SSID", os.environ.get("DRAFTHUB_WIFI_SSID", "DraftHub WiFi"), 140)
-        self.draw_label_value("IP", self.ip_address or "Detecting...", 166)
-        self.draw_label_value("Manager", manager_url, 192)
-        self.draw_label_value("Build", self.build_label, 218)
+        counts = self.media_counts()
+        self.draw_section_title("DraftHub Player", "Device status")
+        self.draw_panel(pygame.Rect(58, 112, 364, 132), "NETWORK", "Online", COLORS["success"])
+        self.draw_label_value("IP", self.ip_address or "Detecting...", 142)
+        self.draw_label_value("Manager", manager_url, 172)
+        self.draw_label_value("Build", self.build_label, 202)
+        self.draw_label_value("Mode", "Local player", 232)
 
-        self.draw_panel(pygame.Rect(58, 252, 364, 80), "DEVICE HOTSPOT", "Ready", COLORS["accent"])
-        self.draw_label_value("Access point", os.environ.get("DRAFTHUB_AP_SSID", "DraftHub-Setup"), 278)
-        self.draw_label_value("Setup", "http://192.168.4.1", 306)
-        self.draw_button("WiFi settings", pygame.Rect(126, 342, 132, 32), COLORS["accent_dark"])
-        self.draw_button("Refresh", pygame.Rect(268, 342, 86, 32), COLORS["panel_alt"])
+        self.draw_panel(pygame.Rect(58, 268, 364, 104), "MEDIA LOADED", f"{counts['total']} files", COLORS["accent"])
+        self.draw_label_value("Videos", str(counts["videos"]), 302)
+        self.draw_label_value("Images", str(counts["images"]), 332)
+        self.draw_label_value("Other", str(counts["other"]), 362)
+
+    def media_counts(self) -> dict[str, int]:
+        counts = {"videos": 0, "images": 0, "other": 0, "total": 0}
+        try:
+            paths = list(self.upload_server.media_dir.iterdir())
+        except OSError:
+            return counts
+        for path in paths:
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if not path.name.lower().endswith(UploadServer.MEDIA_SUFFIXES):
+                continue
+            counts["total"] += 1
+            if suffix in UploadServer.IMAGE_SUFFIXES:
+                counts["images"] += 1
+            elif suffix in (".vid", ".rgb565", ".mp4"):
+                counts["videos"] += 1
+            else:
+                counts["other"] += 1
+        return counts
 
     def refresh_network_address(self) -> None:
         now = time.monotonic()
@@ -1147,21 +1134,6 @@ class DraftHubApp:
         self.draw_text(marker, (84, y + 17), self.font_body, COLORS["accent"])
         self.draw_text(title, (122, y + 9), self.font_body)
         self.draw_text(detail, (122, y + 31), self.font_small, COLORS["muted"])
-
-    def draw_navigation(self) -> None:
-        nav_top = HEIGHT - 92
-        nav_left = 94
-        nav_width = 292
-        pygame.draw.rect(self.canvas, COLORS["panel_alt"], pygame.Rect(nav_left, nav_top, nav_width, 36), border_radius=12)
-        item_width = nav_width // len(NAV_ITEMS)
-        self.nav_rects.clear()
-        for index, item in enumerate(NAV_ITEMS):
-            rect = pygame.Rect(nav_left + index * item_width, nav_top, item_width, 36)
-            self.nav_rects[item.key] = rect
-            if item.key == self.active_view:
-                pygame.draw.rect(self.canvas, COLORS["accent_dark"], rect)
-                pygame.draw.rect(self.canvas, COLORS["accent"], pygame.Rect(rect.x, rect.y, rect.width, 4))
-            self.draw_text(item.label, rect.center, self.font_small, align="center")
 
     def draw_text(
         self,
